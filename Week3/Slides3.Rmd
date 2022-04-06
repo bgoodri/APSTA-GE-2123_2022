@@ -457,9 +457,9 @@ Gabba <- mutate(Gabba, # Virginia is somewhat ambiguous due to the 2021 election
   on the county's Trump vote percentage?
   
 ```{r}
-m <- append(m, values = 5,   after = 1)
-r <- append(r, values = 4,   after = 1)
-a <- append(a, values = 0,   after = 1) # symmetric
+m <- append(m, values = -5,  after = 1)
+r <- append(r, values =  4,  after = 1)
+a <- append(a, values =  0,  after = 1) # symmetric
 s <- append(s, values = 0.5, after = 1) # logistic tails
 ```
 
@@ -472,7 +472,7 @@ X <- sweep(X, MARGIN = 2, STATS = colMeans(X), FUN = `-`)           # center eac
 ## Calling the `stan` Function
 
 ```{r, bivariate, cache = TRUE, results = "hide", dependson = "GOP_govs", message = FALSE}
-post <- stan("linear.stan", data = list(N = nrow(Gabba), K = ncol(X), y = Gabba$Vaccinated, 
+post <- stan("linear.stan", data = list(N = nrow(Gabba), K = ncol(X), y = Gabba$Vaccinated,
                                         X = X, prior_only = 0, m = m, r = r, a = a, s = s))
 ```
 ```{r}
