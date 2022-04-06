@@ -354,7 +354,7 @@ functions {
      @param steepness real parameter between  0 and 1
      @return real number that is ~GLD
    */
-  real GLD_qf(real p, real median, real IQR, real asymmetry, real steepness) {
+  real gld_qf(real p, real median, real IQR, real asymmetry, real steepness) {
     real CHI = fabs(asymmetry);
     if (IQR < 0) reject("IQR must be non-negative");
     if (steepness < 0 || steepness > 1) 
@@ -381,8 +381,8 @@ functions {
      @param steepness real parameter between  0 and 1
      @return real number that is ~GLD
    */
-  real GLD_rng(real median, real IQR, real asymmetry, real steepness) {
-    return GLD_qf(uniform_rng(0, 1), median, IQR, asymmetry, steepness);
+  real gld_rng(real median, real IQR, real asymmetry, real steepness) {
+    return gld_qf(uniform_rng(0, 1), median, IQR, asymmetry, steepness);
   }
 
   /*
@@ -442,7 +442,7 @@ functions {
     real denom = high - low;
     return [(x_r[3] + x_r[1] - 2 * x_r[2]) / (x_r[3] - x_r[1]) 
              - (high + low - 2 * S_(0.5, chi, xi)) / denom,
-            x_r[4] - GLD_qf(x_r[5], x_r[2], x_r[3] - x_r[1], chi, xi)]';
+            x_r[4] - gld_qf(x_r[5], x_r[2], x_r[3] - x_r[1], chi, xi)]';
   }
 
   /*
@@ -463,8 +463,8 @@ functions {
     real ub = 0.5 * fmin(1 + chi, 1 - chi);
     real xi = inv_logit(free[2]) * ub;
     if (is_nan(chi) || is_nan(xi)) return rep_vector(positive_infinity(), 2);
-    return [x_r[1] - GLD_qf(0, x_r[3], x_r[4], chi, xi), 
-            x_r[2] - GLD_qf(1, x_r[3], x_r[4], chi, xi)]';
+    return [x_r[1] - gld_qf(0, x_r[3], x_r[4], chi, xi), 
+            x_r[2] - gld_qf(1, x_r[3], x_r[4], chi, xi)]';
   }
 
   /*
@@ -495,7 +495,7 @@ functions {
     return [chi, xi]';
   }
   
-  vector GLD_solver_bounded(data row_vector bounds, data real m, data real r) {
+  vector gld_solver_bounded(data row_vector bounds, data real m, data real r) {
     int x_i[0];
     vector[2] free = algebra_solver(equations3,
                                     [0, logit(1 - 2 * inv_sqrt(5))]',
