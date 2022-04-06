@@ -1,0 +1,586 @@
+---
+title: "Linear Models with Stan"
+author: "Ben Goodrich"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+autosize: true
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{amssymb}
+   - \usepackage{color}
+   - \usepackage{cancel}
+output:
+  ioslides_presentation:
+    widescreen: yes
+editor_options: 
+  chunk_output_type: console
+params:
+  class: FALSE
+---
+<style type="text/css">
+slides > slide:not(.nobackground):after {
+  content: '';
+}
+</style>
+
+<script type="text/x-mathjax-config">
+MathJax.Hub.Register.StartupHook("TeX Jax Ready",function () {
+  MathJax.Hub.Insert(MathJax.InputJax.TeX.Definitions.macros,{
+    cancel: ["Extension","cancel"],
+    bcancel: ["Extension","cancel"],
+    xcancel: ["Extension","cancel"],
+    cancelto: ["Extension","cancel"]
+  });
+});
+</script>
+
+```{r setup, include=FALSE}
+options(width = 90)
+library(knitr)
+library(rgl)
+knit_hooks$set(rgl = hook_plot_custom)
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar = c(4, 4, .1, .1), las = 1)  # smaller margin on top and right
+})
+library(rstan)
+options(mc.cores = parallel::detectCores())
+```
+
+## Basic Matrix Algebra
+
+- A vector can be a column vector (vertical) or row vector (horizontal)
+- I use boldface for vectors and matrices and $\top$ for transposition
+- A row vector multiplied by a column vector of the same size is a scalar, i.e.
+$$\mathbf{x}^\top \boldsymbol{\beta} = \sum_{k = 1}^K x_k \beta_k$$
+- A matrix multiplied by a column vector is a column vector that is obtained
+  by treating each row of the matrix as a row vector, i.e.
+$$\boldsymbol{\mu} = \alpha + \mathbf{X} \boldsymbol{\beta}$$  
+
+## Differentiating the Log Posterior Kernel
+
+* Stan always works with log-PDFs or really log-kernels (in $\boldsymbol{\theta}$)
+$$\ln f\left(\boldsymbol{\theta} \mid \mathbf{y}, \dots\right) =
+\ln f\left(\boldsymbol{\theta} \mid \dots\right) +
+\ln L\left(\boldsymbol{\theta}; \mathbf{y}\right) -
+\ln f\left(\mathbf{y} \mid \dots\right)$$
+* The gradient of the log posterior PDF is the gradient of the log-kernel
+$$\boldsymbol{\nabla} \ln f\left(\boldsymbol{\theta} \mid \mathbf{y}, \dots\right) =
+\boldsymbol{\nabla} \ln f\left(\boldsymbol{\theta} \mid \dots\right) +
+\boldsymbol{\nabla} \ln L\left(\boldsymbol{\theta}; \mathbf{y}\right) + \mathbf{0}$$
+* This gradient is basically exact, and the chain rule can be executed 
+  by a C++ compiler without the user having to compute any derivatives
+
+## Hamiltonian Monte Carlo
+
+* Stan pairs the $J$ "position" variables $\boldsymbol{\theta}$ with $J$
+  "momentum" variables $\boldsymbol{\phi}$ and draws from
+  the joint posterior distribution of $\boldsymbol{\theta}$ and $\boldsymbol{\phi}$
+* Since the likelihood is NOT a function of $\phi_j$, the posterior distribution
+  of $\phi_j$ is the same as its prior, which is normal with a "tuned" standard deviation. 
+  So, at the $s$-th MCMC iteration, we just draw each $\widetilde{\phi}_j$ from its normal distribution.
+* Using physics, the realizations of each $\widetilde{\phi}_j$ at iteration $s$ "push" 
+  $\boldsymbol{\theta}$ from iteration $s - 1$ for a random amount of time through the 
+  parameter space whose topology is defined by the (negated) log-kernel of the posterior distribution
+* Although the ODEs must be solved numerically, the integral in "time" is one-dimensional
+  and there are very good customized numerical integrators
+
+## Hamiltonian Monte Carlo
+
+* Instead of simply drawing from the posterior distribution whose PDF is
+  $f\left(\left.\boldsymbol{\theta}\right|\mathbf{y}\dots\right) \propto
+   f\left(\boldsymbol{\theta}\right) L\left(\boldsymbol{\theta};\mathbf{y}\right)$
+  Stan augments the "position" variables $\boldsymbol{\theta}$ with an
+  equivalent number of "momentum" variables $\boldsymbol{\phi}$ and draws from
+  $$f\left(\left.\boldsymbol{\theta}\right|\mathbf{y}\dots\right) \propto
+    \int_{-\infty}^{\infty} \dots \int_{-\infty}^{\infty} \prod_{k=1}^K
+    \frac{1}{\sigma_k\sqrt{2\pi}}e^{-\frac{1}{2}\left(\frac{\phi_k}{\sigma_k}\right)^2}
+    f\left(\boldsymbol{\theta}\right) L\left(\boldsymbol{\theta};\mathbf{y}\right)
+    d\phi_1 \dots d\phi_K$$
+* Since the likelihood is NOT a function of $\phi_k$, the posterior distribution
+  of $\phi_k$ is the same as its prior, which is normal with a "tuned" standard deviation. 
+  So, at the $s$-th MCMC iteration, we just draw each $\widetilde{\phi}_k$ from its normal distribution.
+* Using physics, the realizations of each $\widetilde{\phi}_k$ at iteration $s$ "push" 
+  $\boldsymbol{\theta}$ from iteration $s - 1$ through the parameter space whose
+  topology is defined by the negated log-kernel of the posterior distribution:
+  $-\ln f\left(\boldsymbol{\theta}\right) - \ln L\left(\boldsymbol{\theta};\mathbf{y}\right)$
+* See HMC.R demo and next slide
+
+## Demo of Hamiltonian Monte Carlo
+
+```{r, webgl = TRUE, echo = FALSE, warning = FALSE}
+dbinorm <- function(xy, mu_X, sigma_X, mu_Y, sigma_Y, rho, log = FALSE) {
+  if (log) {
+    return(dnorm(xy[1], mean = mu_X, sd = sigma_X, log = TRUE) +
+           dnorm(xy[2], mean = mu_Y + rho * sigma_Y / sigma_X * (xy[1] - mu_X),
+                 sd = sigma_Y * sqrt((1 + rho) * (1 - rho)), log = TRUE))
+  } else {
+    return(dnorm(xy[1], mean = mu_X, sd = sigma_X) *
+           dnorm(xy[2], mean = mu_Y + rho * sigma_Y / sigma_X * (xy[1] - mu_X),
+                 sd = sigma_Y * sqrt((1 + rho) * (1 - rho))))
+  }
+}
+
+# gradient of log bivariate normal PDF
+g <- function(x, y, mu_X, mu_Y, sigma_X, sigma_Y, rho) {
+  beta <- rho * sigma_Y / sigma_X
+  sigma <- sigma_Y * sqrt(1 - rho^2)
+  c(x = -(x - mu_X) / sigma_X^2 - (y - (mu_Y + beta * (x - mu_X))) / sigma^2 * -beta,
+    y = -(y - (mu_Y + beta * (x - mu_X))) / sigma^2)
+}
+
+# bivariate normal PDF in log form and negated
+dbvn <- function(x, y, mu_X = 0, mu_Y = 0, sigma_X = 1, sigma_Y = 1, rho = 0.75) {
+  return(-apply(cbind(x, y), MARGIN = 1, FUN = dbinorm, log = TRUE, mu_X = mu_X,
+                mu_Y = mu_Y, sigma_X = sigma_X, sigma_Y = sigma_Y, rho = rho))
+}
+
+# 3D plot of dbvn. Use mouse to rotate and right-click to zoom in
+persp3d(dbvn, xlim = c(-2,2), ylim = c(-2,2), alpha = 0.5, 
+        xlab = "x", ylab = "y", zlab = "neg-log-density")
+
+# same as dbvn but without vectorization and also returns gradient wrt x and y
+dbvn2 <- function(initial, grad = TRUE, mu_X = 0, mu_Y = 0, sigma_X = 1, sigma_Y = 1, rho = 0.75) {
+  x <- initial[1]; y <- initial[2]
+  out <- dbinorm(c(x, y), mu_X, mu_Y, sigma_X, sigma_Y, rho, log = FALSE)
+  if (grad) attributes(out)$grad <- g(x, y, mu_X, mu_Y, sigma_X, sigma_Y, rho)
+  return(out)
+}
+
+# source some of Radford Neal's functions ( http://www.cs.utoronto.ca/~radford/GRIMS.html )
+results <- sapply(c("utilities.r", "mcmc.r", "basic_hmc.r"), FUN = function(x)
+  source(paste0("http://www.cs.toronto.edu/~radford/ftp/GRIMS-2012-06-07/", x)))
+
+set.seed(12345)
+HMC <- basic_hmc(dbvn2, initial = c(x = 0.9, y = 0.2), nsteps = 700, step = .65, return.traj = TRUE)
+pos <- HMC$traj.q
+# starting point
+ID <- points3d(x = pos[1,1], y = pos[1,2], z = dbvn(pos[1,1], pos[1,2]), col = "green", size = 7)
+
+rglwidget() %>%
+playwidget(ageControl(births = 1:nrow(pos),
+                      ages = 1:nrow(pos),
+                      objids = ID,
+                      value = 1,
+                      x = pos[,1], y = pos[,2],
+                      z = apply(pos, 1, FUN = function(xy) dbvn(xy[1], xy[2]))),
+           start = 1, stop = nrow(pos), step = 1, rate = 3, loop = TRUE)
+```
+
+## No U-Turn Sampling (NUTS)
+
+* The location of $\boldsymbol{\theta}$ moving according to Hamiltonian physics at any instant
+  would be a valid draw from the posterior distribution
+* But (in the absence of friction) $\boldsymbol{\theta}$ moves indefinitely so when do you 
+  stop?
+* [Hoffman and Gelman (2014)](http://www.stat.columbia.edu/~gelman/research/published/nuts.pdf) proposed 
+  stopping when there is a "U-turn" in the sense the footprints turn around and start to head in 
+  the direction they just came from. Hence, the name No U-Turn Sampling.
+* After the U-Turn, one footprint is selected with probability proportional to the posterior
+  kernel to be the realization of $\boldsymbol{\theta}$ on iteration $s$ and the process
+  repeates itself
+* NUTS discretizes a continuous-time Hamiltonian process in order to solve a system of
+  Ordinary Differential Equations (ODEs), which requires a stepsize that is also tuned
+  during the warmup phase
+* [Video](https://www.youtube.com/watch?time_continue=1&v=qxCQoZC0CVY&feature=emb_logo)
+  and R [code](https://github.com/andrewGhazi/funstuff/blob/master/R/nuts.R)
+
+## Using Stan via R
+
+1. Write the program in a (text) .stan file w/ R-like syntax that ultimately
+defines a posterior log-kernel. Stan's parser, `rstan::stanc`, does two things:
+    * checks that program is syntactically valid and tells you if not
+    * writes a conceptually equivalent C++ source file to disk
+2. C++ compiler creates a binary file from the C++ source
+3. Execute the binary from R (can be concurrent with 2)
+4. Analyze the resulting samples from the posterior
+    * Posterior predictive checks
+    * Model comparison
+    * Decision
+
+## A Better Model for Vaccine Effectiveness
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines(file.path("..", "Week2", "coronavirus.stan")))
+```
+
+## Drawing from a Posterior Distribution with NUTS
+
+```{r, Stan, cache = TRUE, results = "hide", message = FALSE, warning = FALSE}
+source(file.path("..", "Week2", "GLD_helpers.R"))
+a_s <- GLD_solver_LBFGS(lower_quartile = 0.15, median = 0.3, upper_quartile = 0.55,
+                        other_quantile = -0.5, alpha = 0.01)
+post <- stan(file.path("..", "Week2", "coronavirus.stan"),
+             data = list(n = 94, y = 8, m = 0.3, IQR = 0.4, 
+                         asymmetry = a_s[1], steepness = a_s[2]),
+             seed = 12345, control = list(adapt_delta = .95))
+```
+```{r}
+post
+```
+
+## Warnings You Should Be Aware Of
+
+1. Divergent Transitions: This means the tuned stepsize ended up too big relative
+  to the curvature of the log-kernel. Increase `adapt_delta` above its default value
+  ($0.8$) and / or use more informative priors
+2. Hitting the maximum treedepth: This means the tuned stepsize ended up so small
+  that it could not get all the way around the parameter space in one iteration.
+  Increase `max_treedepth` beyond its default value of $10$ but each increment
+  will double the wall time, so only do so if you hit the max a lot
+3. Bulk / Tail Effective Sample Size too low: This means the tuned stepsize ended up 
+  so small that adjacent draws have too much dependence. Increase the number of
+  iterations or chains
+4. $\widehat{R} > 1.01$: This means the chains have not converged. You could try
+  running the chains longer, but there is probably a deeper problem.
+5. Low Bayesian Fraction of Information: This means that you posterior distribution
+  has really extreme tails. You could try running the chains longer, but there is 
+  probably a deeper problem.
+
+## Data on 2020 Trump Vote and 2022 Vaccination
+
+```{r, Gabba, message = FALSE}
+library(readr); library(dplyr)
+# https://docs.google.com/spreadsheets/d/100BFc0VppVL8CIhaNh5ZiTFGBNCnGBdYzfqISAWxln8/
+Gabba <- read_csv("Gabba.csv", col_types = c("ccccdddddddddd"), skip = 1, col_names = 
+                    c("FIPS", "ST", "State", "County", "Trump#", "Votes#", "Trump", "Pop",
+                      "Vaccinated#", "Vaccinated", "Death1", "Death2", "Death3", "Death4"))
+Gabba <- filter(Gabba, Vaccinated < 100) # some data points were messed up
+select(Gabba, State:Vaccinated) %>%
+  glimpse # each row is a county
+```
+
+## Thinking About Priors
+
+- It is usually a good idea to center all predictors so that the intercept
+  can be interpreted as the expected outcome for a unit with "average" predictors
+- What are your beliefs about the expected covid vaccination percentage as of March $2022$
+  in a county with an average percentage of Trump voters in $2020$?
+  
+> - What are your beliefs about the expected covid vaccination percentage in a
+  county with 1% more Trump voters than average?
+> - What are your beliefs about the error standard deviation when predicting
+  vaccination percentage with Trump vote percentage only?
+> - Do it, using `source(file.path("..", "Week2", "GLD_helpers.R"))`
+
+## Prior Hyperparameters
+
+```{r, warning = FALSE}
+m <- c(beta = -0.5, alpha = 50, sigma = 10)
+r <- c(beta =  0.4, alpha = 20, sigma = 10)
+a_s_beta  <- GLD_solver_bounded(bounds = c(-1, 1),  median = m[1], IQR = r[1])
+a_s_alpha <- GLD_solver_bounded(bounds = c(0, 100), median = m[2], IQR = r[2])
+a_s_sigma <- GLD_solver_LBFGS(lower_quartile = 5, median = 10, upper_quartile = 15,
+                              other_quantile = 0, alpha = 0)
+a <- c(beta = a_s_beta[1], alpha = a_s_alpha[1], sigma = a_s_sigma[1])
+s <- c(beta = a_s_beta[2], alpha = a_s_alpha[2], sigma = a_s_sigma[2])
+```
+
+## Primitive Object Types in Stan
+
+- In Stan / C++, variables must declared with types
+- In Stan / C++, statements are terminated with semi-colons
+- Primitive scalar types: `real x;` or `int K;`
+    - Unknowns cannot be `int` because no derivatives and hence no HMC
+    - Can condition on integer data because no derivatives are needed
+- Implicitly real `vector[K] z;` or `row_vector[K] z;`
+- Implicitly real `matrix[N,K] X;` can have 1 column / row
+- Arrays are just holders of any other homogenous objects
+    - `real x[N]` is similar to `vector[N] x;` but lacks linear algebra functions
+    - `vector[N] X[K];` and `row_vector[K] X[N]` are similar to
+      `matrix[N,K] X;` but lack linear algebra functionality, although
+      they have uses in loops
+- Vectors and matrices cannot store integers,
+  so instead use possibly multidimensional integer arrays `int y[N];` or `int Y[N,P];`
+
+## The `lookup` Function in **rstan**
+
+- Can input the name of an R function, in which case it will try
+to find an analagous Stan function
+- Can input a regular expression, in which case it will find matching
+Stan functions that match
+```{r, size='footnotesize',comment="#", message = FALSE}
+lookup("^inv.*[^gf]$") # functions starting with inv but not ending with g or f
+```
+
+## Optional `functions` Block of .stan Programs
+
+- Stan permits users to define and use their own functions, which is
+  what we did with `#include quantile_functions.stan`
+- If used, must be defined in a leading `functions` block
+- Can only validate constraints inside user-defined functions
+- Very useful for several reasons:
+    - Easier to reuse across different .stan programs
+    - Makes subsequent chunks of code more readable
+    - Enables posteriors with Ordinary Differential Equations, algebraic
+      equations, and integrals
+    - Can be exported to R via `expose_stan_functions()`
+- All functions, whether user-defined or build-in, must be called by
+argument position rather than by argument name, and there are no default
+arguments
+- User-defined functions cannot have the same name as existing functions
+or keywords and are case-sensitive
+
+## Constrained Object Declarations in Stan
+
+Outside of the `functions` block, any primitive object can have bounds:
+
+- `int<lower = 1> K;` `real<lower = -1, upper = 1> rho;`
+- `vector<lower = 0>[K] alpha;` and similarly for a `matrix`
+- A `vector` (but not a `row_vector`) can be further specialized:
+    - `unit_vector[K] x;` implies $\sum_{k=1}^{K}x_{k}^{2}=1$
+    - `simplex[K] x;` implies $x_{k}\geq0\,\forall k$ and $\sum_{k=1}^{K}x_{k}=1$
+    - `ordered[K] x;` implies $x_{j}<x_{k}\,\forall j<k$
+    - `positive_ordered[K] x;` implies $0<x_{j}<x_{k}\,\forall j<k$
+- A `matrix` can be specialized to enforce constraints:
+    - `cov_matrix[K] Sigma;` or better `cholesky_factor_cov[K, K] L;`
+    - `corr_matrix[K] Lambda;` or `cholesky_factor_corr[K] C;`
+
+## "Required" `data` Block of .stan Programs
+
+- All knowns passed from R to Stan as a NAMED list, such as
+  outcomes $\left(\mathbf{y}\right)$, covariates $\left(\mathbf{X}\right)$,
+  constants $\left(K\right)$, and / or known hyperparameters
+- Basically, everything posterior distribution conditions on
+- Can have comments in C++ style (`//` or `/* ... */`)
+- Whitespace is essentially irrelevant, except after keywords
+```{stan output.var="data", eval = FALSE}
+data {
+  int<lower = 0> N; // number of observations
+  int<lower = 0> K; // number of predictors
+  matrix[N, K] X;   // matrix of predictors
+  vector[N] y;      // outcomes
+  int<lower = 0, upper = 1> prior_only;   // ignore data?
+  vector[K + 2] m;                        // prior medians
+  vector<lower = 0>[K + 2] r;             // prior IQRs
+  vector<lower = -1, upper = 1>[K + 2] a; // prior asymmetry
+  vector<lower =  0, upper = 1>[K + 2] s; // prior steepness
+}
+```
+
+## "Required" `parameters` Block of .stan Programs
+
+- Declare exogenous unknowns whose posterior distribution is sought
+- Cannot declare any integer parameters, only real parameters
+- Must specify the parameter space but `lower` and `upper`
+bounds are implicitly $\pm\infty$ if unspecified
+```{stan output.var="parameter", eval = FALSE}
+parameters {
+  vector<lower = 0, upper = 1>[K + 2] p;  // CDF values
+}
+```
+- The change-of-variables adjustment due to the transformation from
+an unconstrained parameter space to the constrained space
+is handled automatically and added to `target`
+
+## Optional `transformed parameters` Block
+
+- Comes after the `parameters` block but before the `model` block
+- Need to declare objects before they are assigned
+- Calculate endogenous unknowns that are deterministic functions of things declared in earlier blocks
+- Used to create interesting intermediate inputs to the log-kernel
+- Declared constraints are validated and samples are stored
+```{stan output.var="tparameter", eval = FALSE}
+transformed parameters {
+  vector[K] beta; // as yet undefined
+  real alpha = GLD_qf(p[K + 1], m[K + 1], r[K + 1], a[K + 1], s[K + 1]);
+  real<lower = 0> sigma = GLD_qf(p[K + 2], m[K + 2], r[K + 2], a[K + 2], s[K + 2]);
+  for (k in 1:K) beta[k] = GLD_qf(p[k], m[k], r[k], a[k], s[k]); // now defined
+}
+```
+
+## "Required" `model` Block of .stan Programs
+
+- Can declare endogenous unknowns, assign to them, and use them
+- Constraints cannot be declared / validated and samples not stored
+- The `model` block must define (something proportional to) $\text{target}=\log\left(f\left(\boldsymbol{\theta}\right)\times f\left(\left.\mathbf{y}\right|\boldsymbol{\theta},\cdot\right)\right)=\log f\left(\boldsymbol{\theta}\right)+\log f\left(\left.\mathbf{y}\right|\boldsymbol{\theta},\cdot\right)$
+- There is an internal reserved symbol called `target` that is
+initialized to zero (before change-of-variable adjustments) you increment by `target += ...;`
+- Functions ending `_lpdf` or `_lpmf` return scalars even if some of their arguments are vectors or 
+  one-dimensional arrays, in which case it sums the log density/mass over the presumed conditionally
+  independent elements
+```{stan output.var="model", eval = FALSE}
+model { // log likelihood, equivalent to target += normal_lpdf(y | alpha + X * beta, sigma)
+  if (!prior_only) target += normal_id_glm_lpdf(y | X, alpha, beta, sigma);
+} // implicit: p ~ uniform(0, 1)
+```
+
+## Entire Stan Program {.smaller}
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("linear.stan"))
+```
+
+## Calling the `stan` Function
+
+```{r, simple, cache = TRUE, dependson = "Gabba", results = "hide", message = FALSE}
+post <- stan("linear.stan", data = list(N = nrow(Gabba), K = 1, y = Gabba$Vaccinated, 
+                                        X = as.matrix(Gabba$Trump - mean(Gabba$Trump)),
+                                        prior_only = FALSE, m = m, r = r, a = a, s = s))
+```
+```{r}
+post
+```
+
+## Working with the Marginal Posterior Draws
+
+```{r}
+draws <- as.data.frame(post) %>% select(-starts_with("p")) # has 4000 rows
+quantile(draws$`beta[1]`, probs = c(.05, .95)) # what people mistake confidence intervals for
+mean(draws$`beta[1]` > -0.5) # what people mistake p-values for
+```
+
+## Working with Posterior Predictive Distributions
+
+```{r}
+x <- Gabba$Trump - mean(Gabba$Trump)
+mu <- draws$alpha + t(sapply(draws$`beta[1]`, FUN = function(beta) x * beta))
+y_ <- matrix(rnorm(length(mu), mean = mu, sd = draws$sigma), nrow(mu), ncol(mu))
+dim(y_) # draws from the posterior predictive distribution that INCLUDES the posterior noise
+lower <- apply(y_, MARGIN = 2, FUN = quantile, probs = 0.25)
+upper <- apply(y_, MARGIN = 2, FUN = quantile, probs = 0.75)
+with(Gabba, c(too_low = mean(Vaccinated < lower), too_high = mean(Vaccinated > upper),
+              just_right = mean( (Vaccinated > lower) & (Vaccinated < upper))))
+```
+
+> - Ideally, the last line would be `.25 .25 .50` but this is not too bad. The
+  model is not quite making extreme enough predictions.
+
+## Republican Governors {.build}
+
+```{r, GOP_gov}
+Gabba <- mutate(Gabba, # Virginia is somewhat ambiguous due to the 2021 election
+                GOP_gov = !(ST %in% c("CA", "CO", "CT", "DE", "HI", "IL", "KS", "KY", "LA", 
+                                      "ME", "MI", "MN", "NV", "NJ", "NM", "NY", "NC", "OR", 
+                                      "PA", "RI", "VA", "WA", "WI", "DC")))
+```
+
+> - What are your beliefs about the effect of a state having a Republican governor, conditional
+  on the county's Trump vote percentage?
+  
+```{r}
+m <- append(m, values = 5,   after = 1)
+r <- append(r, values = 4,   after = 1)
+a <- append(a, values = 0,   after = 1) # symmetric
+s <- append(s, values = 0.5, after = 1) # logistic tails
+```
+
+- Here is a good way to make a centered matrix of predictors in R
+```{r}
+X <- model.matrix(Vaccinated ~ Trump + GOP_gov, data = Gabba)[, -1] # drop column of 1s
+X <- sweep(X, MARGIN = 2, STATS = colMeans(X), FUN = `-`)           # center each column
+```
+
+## Calling the `stan` Function
+
+```{r, bivariate, cache = TRUE, results = "hide", dependson = "GOP_govs", message = FALSE}
+post <- stan("linear.stan", data = list(N = nrow(Gabba), K = ncol(X), y = Gabba$Vaccinated, 
+                                        X = X, prior_only = 0, m = m, r = r, a = a, s = s))
+```
+```{r}
+print(post, pars = c("p", "lp__"), include = FALSE)
+```
+
+## Posterior Planes
+
+```{r, fig.width=10, fig.height=5, small.mar = TRUE}
+pairs(post, pars = "p", include = FALSE) # this all looks fine in this case
+```
+
+## ShinyStan
+
+```{r, eval = FALSE}
+library(shinystan)
+launch_shinystan(post) # opens in a web browser
+```
+
+## Utility Function for Predictions of Future Data
+
+- For Bayesians, the log predictive PDF is the most appropriate utility function
+- Choose the model that maximizes the expectation of this over FUTURE data
+$$\mbox{ELPD} = \mathbb{E}_Y \ln f\left(y_{N + 1}, y_{N + 2}, \dots, y_{2N} \mid y_1, y_2, \dots, y_N\right) = \\
+  \ln \int_{-\infty}^\infty \cdots \int_{-\infty}^\infty \int_{-\infty}^\infty 
+  f\left(y_{N + 1}, y_{N + 2}, \dots, y_{2N} \mid \mathbf{y}\right) 
+  dy_{N + 1} dy_{N + 2} \dots dy_{2N} \approx  \\
+  \sum_{n = 1}^N \ln f\left(y_n \mid \mathbf{y}_{-n}\right) = \sum_{n = 1}^N
+  \ln \int_\Theta f\left(y_n \mid \boldsymbol{\theta}\right) 
+  f\left(\boldsymbol{\theta} \mid \mathbf{y}_{-n}\right) d\theta_1 d\theta_2 \dots d\theta_K$$
+  
+> - $f\left(y_n \mid \boldsymbol{\theta}\right)$ is just the $n$-th likelihood contribution,
+  but can we somehow obtain $f\left(\boldsymbol{\theta} \mid \mathbf{y}_{-n}\right)$ from 
+  $f\left(\boldsymbol{\theta} \mid \mathbf{y}\right)$?
+> - Yes, assuming $y_n$ does not have an outsized influence on the posterior  
+
+## Optional `generated quantities` Block
+
+- Can declare more endogenous knowns, assign to them, and use them
+- Samples are stored
+- Can reference anything except stuff in the `model` block
+- Can also do this in R afterward, but primarily used for
+    - Interesting functions of posterior that don't involve likelihood
+    - Posterior predictive distributions and / or functions thereof
+    - The log-likelihood for each observation to pass to `loo`
+
+## Utilizing Stand-Alone Generated Quantities
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("generated_quantities.stan"))
+```
+
+## Calling Stand-Alone Generated Quantities {.build}
+
+```{r, gqs, cache = TRUE, results = "hide", dependson = "GOP_govs", message = FALSE}
+mod <- stan_model("generated_quantities.stan")
+log_lik <- gqs(mod, draws = as.matrix(post),
+               data = list(N = nrow(Gabba), K = ncol(X), y = Gabba$Vaccinated, X = X))
+```
+
+```{r, loo, cache = TRUE}
+loo(log_lik)
+```
+
+## What about the States?
+
+- Suppose we wanted to include an intercept for each state, rather than merely an
+  indicator for whether the state has a Republican governor
+- We could include $50$ dummy variables in $\mathbf{X}$ and specify priors on
+  those coefficients, but McElreath prefers the following approach
+```{r, state, cache = TRUE}
+X <- as.matrix(Gabba$Trump - mean(Gabba$Trump))
+group <- as.factor(Gabba$State)
+nlevels(group) # size N but only 51 unique values
+```
+- We can also utilize normal priors if we prefer with means and standard deviations as
+```{r}
+m     <- c(beta = -0.5, alpha = 50, sigma = 10)
+scale <- c(beta = 0.25, alpha = 10, sigma = 3)
+```
+
+##
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("groups.stan"))
+```
+
+## Calling `stan` for the grouped model
+
+```{r, groups, cache = TRUE, results = "hide", dependson = "state", message = FALSE}
+states <- stan("groups.stan", data = list(N = nrow(Gabba), K = ncol(X), y = Gabba$Vaccinated, 
+                                          X = X, J = nlevels(group), group = as.integer(group),
+                                          prior_only = 0, m = m, scale = scale)) # ^ important
+```
+```{r}
+states # only 6 states could fit on the screen but all 51 intercepts were estimated
+```
+
+## Model Comparison {.build}
+
+```{r, loo2, cache = TRUE, message = FALSE, warning = FALSE}
+library(loo)
+loo_compare(list(GOP_govs = loo(log_lik), states = loo(states)))
+loo_model_weights(list(GOP_govs = loo(log_lik), states = loo(states)))
+```
+
+## Leverage Diagnostic Plot
+
+```{r}
+plot(loo(states), label_points = TRUE) # not too bad, 318 is D.C.
+```
