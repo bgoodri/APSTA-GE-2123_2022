@@ -1,0 +1,376 @@
+---
+title: "Generalized Linear Models with Stan"
+author: "Ben Goodrich"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+autosize: true
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{amssymb}
+   - \usepackage{color}
+   - \usepackage{cancel}
+output:
+  ioslides_presentation:
+    widescreen: yes
+editor_options: 
+  chunk_output_type: console
+params:
+  class: FALSE
+---
+<style type="text/css">
+slides > slide:not(.nobackground):after {
+  content: '';
+}
+</style>
+
+<script type="text/x-mathjax-config">
+MathJax.Hub.Register.StartupHook("TeX Jax Ready",function () {
+  MathJax.Hub.Insert(MathJax.InputJax.TeX.Definitions.macros,{
+    cancel: ["Extension","cancel"],
+    bcancel: ["Extension","cancel"],
+    xcancel: ["Extension","cancel"],
+    cancelto: ["Extension","cancel"]
+  });
+});
+</script>
+
+```{r setup, include=FALSE}
+options(width = 90)
+library(knitr)
+library(rgl)
+knit_hooks$set(rgl = hook_plot_custom)
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar = c(4, 4, .1, .1), las = 1)  # smaller margin on top and right
+})
+library(rstan)
+options(mc.cores = parallel::detectCores())
+
+library(readr)
+library(dplyr)
+# https://docs.google.com/spreadsheets/d/100BFc0VppVL8CIhaNh5ZiTFGBNCnGBdYzfqISAWxln8/
+Gabba <- read_csv("Gabba.csv", col_types = c("ccccdddddddddd"), skip = 1, col_names = 
+                    c("FIPS", "ST", "State", "County", "Trump#", "Votes#", "Trump", "Pop",
+                      "Vaccinated#", "Vaccinated", "Death1", "Death2", "Death3", "Death4"))
+Gabba <- filter(Gabba, Vaccinated < 100) # some data points were messed up
+
+```
+
+## What about the States?
+
+- Suppose we wanted to include an intercept for each state, rather than merely an
+  indicator for whether the state has a Republican governor
+- We could include $50$ dummy variables in $\mathbf{X}$ and specify priors on
+  those coefficients, but McElreath prefers the following approach
+```{r, state, cache = TRUE}
+X <- as.matrix(Gabba$Trump - mean(Gabba$Trump))
+group <- as.factor(Gabba$State)
+nlevels(group) # size N but only 51 unique values
+```
+- We can also utilize normal priors if we prefer with means and standard deviations as
+```{r}
+m     <- c(beta = -0.5, alpha = 50, sigma = 10)
+scale <- c(beta = 0.25, alpha = 10, sigma = 3)
+```
+
+##
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("groups.stan"))
+```
+
+## Calling `stan` for the grouped model
+
+```{r, groups, cache = TRUE, results = "hide", dependson = "state", message = FALSE}
+states <- stan("groups.stan", data = list(N = nrow(Gabba), K = ncol(X), y = Gabba$Vaccinated, 
+                                          X = X, J = nlevels(group), group = as.integer(group),
+                                          prior_only = 0, m = m, scale = scale)) # ^ important
+```
+```{r}
+states # only 6 states could fit on the screen but all 51 intercepts were estimated
+```
+
+## Utility Function for Predictions of Future Data
+
+- For Bayesians, the log predictive PDF is the most appropriate utility function
+- Choose the model that maximizes the expectation of this over FUTURE data
+$$\mbox{ELPD} = \mathbb{E}_Y \ln f\left(y_{N + 1}, \dots, y_{2N} \mid y_1, \dots, y_N\right) = \\
+  \int \ln f\left(y_{N + 1}, \dots, y_{2N} \mid \mathbf{y}\right)
+  f\left(y_{N + 1}, \dots, y_{2N} \mid \mathbf{y}\right)
+  dy_{N + 1} \dots dy_{2N} \approx  \\
+  \sum_{n = 1}^N \ln f\left(y_n \mid \mathbf{y}_{-n}\right) = \sum_{n = 1}^N
+  \ln \int_\Theta f\left(y_n \mid \boldsymbol{\theta}\right) 
+  f\left(\boldsymbol{\theta} \mid \mathbf{y}_{-n}\right) d\theta_1 d\theta_2 \dots d\theta_K$$
+  
+> - $f\left(y_n \mid \boldsymbol{\theta}\right)$ is just the $n$-th likelihood contribution,
+  but can we somehow obtain $f\left(\boldsymbol{\theta} \mid \mathbf{y}_{-n}\right)$ from 
+  $f\left(\boldsymbol{\theta} \mid \mathbf{y}\right)$?
+> - Yes, assuming $y_n$ does not have an outsized influence on the posterior  
+
+## Optional `generated quantities` Block
+
+- Can declare more endogenous knowns, assign to them, and use them
+- Samples are stored
+- Can reference anything except stuff in the `model` block
+- Can also do this in R afterward, but primarily used for
+    - Interesting functions of posterior that don't involve likelihood
+    - Posterior predictive distributions and / or functions thereof
+    - The log-likelihood for each observation to pass to `loo`
+
+## PSISLOOCV
+
+```{stan output.var="log_lik", eval = FALSE}
+generated quantities { // part of groups.stan
+  vector[N] log_lik;
+  {
+    vector[N] mu = alpha[group] + X * beta;
+    for (n in 1:N) log_lik[n] = normal_lpdf(y[n] | mu[n], sigma);
+  }
+}
+```
+```{r}
+loo(states)
+```
+
+## Leverage Diagnostic Plot
+
+```{r}
+plot(loo(states), label_points = TRUE) # not too bad, 318 is D.C.
+```
+
+## Roach Data in NYC Experiment
+
+```{r, message = FALSE, warning = FALSE}
+ROOT <- "https://raw.githubusercontent.com/avehtari/ROS-Examples/master/"
+FILE <- "Roaches/data/roaches.csv"
+roaches <- readr::read_csv(paste0(ROOT, FILE), col_types = "_idiid")
+library(dplyr)
+roaches <- filter(roaches, roach1 > 0)
+glimpse(roaches)
+```
+
+## Prior Predictive Distribution for Roach Study {.build}
+
+```{tikz, fig.cap = "Roach Model", fig.ext = 'png', echo = FALSE}
+\usetikzlibrary{bayesnet}
+\begin{tikzpicture}[node distance=2cm, auto,>=latex', thick, scale = 0.07]
+
+  % Define nodes
+
+  % Y
+  \node[obs]          (y)   {roaches}; %
+
+  % Xs
+  \node[obs, left=7 of y] (y1) {lag\_roaches}; %
+  \node[obs, above=0.25 of y1] (T)  {treatment}; %
+  \node[obs, above=1.0 of y, xshift=-3cm] (s) {senior}; %
+  \node[obs, above=1.0 of y, xshift=-1.5cm] (o) {offset}; %
+  
+  % conditional mean function
+  \node[det, right=3 of y1] (n) {$\eta$} ; %
+  \node[det, right=5 of y1] (m) {$\mu$} ; %
+
+  % parameters
+  \node[latent, above=3.4 of n]   (a) {$\alpha$} ; %
+  \node[latent, above=3.0 of y1]  (b1) {$\beta_1$}  ; %
+  \node[latent, right=0.5 of b1]  (b2) {$\beta_2$}  ; %
+  \node[latent, right=0.5 of b2]  (b3) {$\beta_3$}  ; %
+
+  \edge {a,b1,b2,b3,y1,T,s,o} {n} ; %
+  \edge {n} {m} ; %
+  \node[const, right=0.4 of n, yshift=-0.25cm] (exp) {$\exp$} ; %
+  
+  % Factors
+  \factor[left=of y] {y-f} {below:$\mathcal{P}$} {m} {y} ; %
+  \factor[above=of a] {a-f} {right:GLD} {} {a}; %
+  \factor[above=of b1] {b1-f} {left:GLD} {} {b1} ; %
+  \factor[above=of b2] {b2-f} {right:GLD} {} {b2} ; %
+  \factor[above=of b3] {b3-f} {right:GLD} {} {b3} ; %
+
+  % Hyperparameters
+%  \node[const, above=0.4 of a-f, xshift=-0.2cm] (m_a) {$m_a$} ; 
+%  \node[const, above=0.4 of a-f, xshift=+0.2cm] (s_a) {$s_a$} ; 
+%  \edge[-] {m_a,s_a} {a-f} ; 
+%  \node[const, above=0.4 of b1-f, xshift=-0.25cm] (m_b1) {$m_{b_1}$} ; 
+%  \node[const, above=0.4 of b1-f, xshift=+0.25cm] (s_b1) {$s_{b_1}$} ; 
+%  \edge[-] {m_b1,s_b1} {b1-f} ; 
+%  \node[const, above=0.4 of b2-f, xshift=-0.25cm] (m_b2) {$m_{b_2}$} ; 
+%  \node[const, above=0.4 of b2-f, xshift=+0.25cm] (s_b2) {$s_{b_2}$} ; 
+%  \edge[-] {m_b2,s_b2} {b2-f} ; 
+%  \node[const, above=0.4 of b3-f, xshift=-0.25cm] (m_b3) {$m_{b_3}$} ; 
+%  \node[const, above=0.4 of b3-f, xshift=+0.25cm] (s_b3) {$s_{b_3}$} ; 
+%  \edge[-] {m_b3,s_b3} {b3-f} ; 
+
+  % Plates
+  \plate {yx} { %
+    (y)(y-f)(y-f-caption) %
+    (y1)(y-f)(y-f-caption) %
+    (T)(y-f)(y-f-caption) %
+    (s)(y-f)(y-f-caption) %
+  } {$\forall n \in 1, 2, \dots, N$} ;
+\end{tikzpicture}
+```
+
+## Prior Predictive Distribution in Symbols
+
+$$
+\alpha \thicksim GLD \\
+\beta_1 \thicksim GLD \\
+\beta_2 \thicksim GLD \\
+\beta_3 \thicksim GLD \\
+\forall n: \eta_n \equiv \alpha + OFFSET_n + 
+  \beta_1 \times \log LAG_n + \beta_2 \times SENIOR_n + \beta_3 \times T_n \\
+\forall n: \mu_n \equiv e^{\eta_n} \\
+\forall n: Y_n \thicksim \mathcal{P}\left(\mu_n\right)
+$$
+
+* In this case, the inverse link function mapping the linear predictor $\eta_n$ 
+  on $\mathbb{R}$ to the outcome's conditional expectation $\mu_n$ on
+  $\mathbb{R}_+$ is the antilog function.
+* An "offset" is a predictor whose coefficient is fixed to be $1$
+
+## Generalized Lambda Distribution Priors
+
+- What do you believe about $\beta_1$, the coefficient on the logarithm of 
+  roaches in the previous period?
+- What do you believe about $\beta_2$, the coefficient on whether the building
+  is a senior living facility?
+- What do you believe about $\beta_3$, the coefficient on the treatment variable?
+- What do you believe about $\alpha$, the expected logarithm of roaches for
+  a building with average predictors?
+
+```{r, include = FALSE, warning = FALSE}
+source(file.path("..", "Week2", "GLD_helpers.R"))
+a_s_beta_1 <- GLD_solver(lower_quartile = 0.75, median = 1, upper_quartile = 4 / 3,
+                         other_quantile = 0, alpha = 0)
+a_s_beta_2 <- GLD_solver(lower_quartile = -0.5, median = 0, upper_quartile = 0.5,
+                         other_quantile = 1, alpha = 0.9)
+a_s_beta_3 <- GLD_solver(lower_quartile = -0.25, median = 0, upper_quartile = 0.1,
+                         other_quantile = -1, alpha = 0.1)
+a_s_alpha  <- a_s_beta_2
+m <- c(1, 0, 0, 0)
+r <- c(4 / 3 - 0.75, 1, 0.35, 1)
+a <- c(a_s_beta_1[1], a_s_beta_2[1], a_s_beta_3[1], a_s_alpha[1])
+s <- c(a_s_beta_1[2], a_s_beta_2[2], a_s_beta_3[2], a_s_alpha[2])
+```
+
+## Calling `stan` for the Poisson Model
+
+```{r}
+stan_data <- list(N = nrow(roaches), offset = log(roaches$exposure2), 
+                  K = 3, y = roaches$y,
+                  X = with(roaches, cbind(log(roach1) - mean(log(roach1)),
+                                          senior - mean(senior),
+                                          treatment - mean(treatment))),
+                  prior_only = FALSE, m = m, r = r, a = a, s = s)
+```
+
+```{r, poisson, cache = TRUE, results = "hide"}
+post_poisson <- stan("poisson.stan", data = stan_data)
+```
+
+## ShinyStan
+
+```{r, eval = FALSE}
+y <- roaches$y
+shinystan::launch_shinystan(post_poisson) # opens in a web browser
+```
+
+## Numerical Assessment of Calibration
+
+```{r}
+y_rep <- rstan::extract(post_poisson, "y_rep")[[1]]; dim(y_rep)
+lower <- apply(y_rep, MARGIN = 2, FUN = quantile, probs = 0.25)
+upper <- apply(y_rep, MARGIN = 2, FUN = quantile, probs = 0.75)
+mean(roaches$y > lower & roaches$y < upper) # bad fit
+```
+
+* Overall, the model is fitting the data poorly in this case, 
+  although overfitting can be a concern in other situations
+
+## Adding Overdispersion
+
+$$
+\alpha \thicksim GLD \\
+\beta_1 \thicksim GLD \\
+\beta_2 \thicksim GLD \\
+\beta_3 \thicksim GLD \\
+\forall n: \eta_n \equiv \alpha + OFFSET_n + 
+  \beta_1 \times \log LAG_n + \beta_2 \times SENIOR_n + \beta_3 \times T_n \\
+\forall n: \mu_n \equiv e^{\eta_n} \\
+\phi \thicksim GLD \\
+\forall n: \epsilon_n \thicksim \mathcal{G}\left(\phi,\phi\right) \\
+\forall n: Y_n \thicksim \mathcal{Poisson}\left(\epsilon_n \mu_n\right)
+$$
+* The conditional distribution of $Y_n$ given $\epsilon_n\mu_n$ is Poisson, but 
+  the conditional distribution of $Y_n$ given $\mu_n$ irrespective of $\epsilon_n$
+  is negative binomial with expectation $\mu_n$ and variance 
+  $\mu_n + \mu_n^2 / \phi$
+* What are your beliefs about $\phi$?
+
+```{r, include = FALSE}
+a_s_phi <- GLD_solver_LBFGS(lower_quartile = 0.25, median = 1, upper_quartile = 1.75,
+                            other_quantile = 0, alpha = 0)
+m <- c(m, 1)
+r <- c(r, 2)
+a <- c(a, a_s_phi[1])
+s <- c(s, a_s_phi[2])
+```
+
+## Calling `stan` for the Negative Binomial Model
+
+```{r}
+stan_data$m <- m; stan_data$r <- r; stan_data$a <- a; stan_data$s <- s
+```
+```{r, nb, cache = TRUE, results = "hide", message = FALSE}
+post_nb <- stan("negative_binomial.stan", data = stan_data)
+```
+```{r}
+print(post_nb, pars = c("alpha", "beta", "phi"))
+```
+
+## Model Comparison {.smaller}
+
+```{r, loo, cache = TRUE, warning = FALSE, message = FALSE}
+library(loo)
+loo_compare(loo(post_poisson), loo(post_nb)) # warnings about high Pareto k values
+loo_list <- list(loo(post_poisson, moment_match = TRUE), loo(post_nb, moment_match = TRUE))
+loo_compare(loo_list)
+loo_model_weights(loo_list)
+```
+
+## A Binomial Model for Romney vs Obama in $2012$
+
+```{r, message = FALSE, warning = FALSE}
+poll <- readRDS("GooglePoll.rds") # WantToWin is coded as 1 for Romney and 0 for Obama
+collapsed <- filter(poll, !is.na(WantToWin)) %>%
+             group_by(Region, Gender, Urban_Density, Age, Income) %>%
+             summarize(Obama = sum(grepl("Obama", WantToWin)), n = n()) %>%
+             na.omit
+glimpse(collapsed)
+```
+
+## Prior Predictive Distribution in Symbols
+
+* Here is how McElreath does many hierarchical binomial models
+* Suppose a categorical predictor $x_k$ has $K$ levels
+$$
+\sigma \thicksim \mathcal{E}\left(r\right) \\
+\forall k: \beta_k \thicksim \mathcal{N}\left(m_k, \sigma\right) \\
+\forall k: \mu_k = \frac{1}{1 + e^{-\beta_k}} \\
+\forall k: y_k \thicksim \text{Binomial}\left(n_k, \mu_k\right)
+$$
+* Aggregating Bernoulli random variables with a common success probability to
+  binomial random variables is much more computationally efficient
+
+## Calling `stan`
+
+```{r, eval = FALSE}
+stan_data <- with(collapsed, list(N = length(Obama), y = Obama, n = n,
+                                  J = c(nlevels(Region), nlevels(Gender), 
+                                        nlevels(Urban_Density), nlevels(Age), nlevels(Income)),
+                                  Region = as.integer(Region), Gender = as.integer(Gender),
+                                  Urban_Density = as.integer(Urban_Density), 
+                                  Age = as.integer(Age), Income = as.integer(Income),
+                                  prior_only = FALSE, m = rep(0, 5), r = rep(1, 5)))
+post_binomial <- stan("binomial.stan", data = stan_data)
+```
+
