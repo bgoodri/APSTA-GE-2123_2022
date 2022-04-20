@@ -1,0 +1,599 @@
+---
+title: "Hierarchical Models with Stan"
+author: "Ben Goodrich"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+autosize: true
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{amssymb}
+   - \usepackage{color}
+   - \usepackage{cancel}
+output:
+  ioslides_presentation:
+    widescreen: yes
+editor_options: 
+  chunk_output_type: console
+---
+<style type="text/css">
+slides > slide:not(.nobackground):after {
+  content: '';
+}
+</style>
+
+<script type="text/x-mathjax-config">
+MathJax.Hub.Register.StartupHook("TeX Jax Ready",function () {
+  MathJax.Hub.Insert(MathJax.InputJax.TeX.Definitions.macros,{
+    cancel: ["Extension","cancel"],
+    bcancel: ["Extension","cancel"],
+    xcancel: ["Extension","cancel"],
+    cancelto: ["Extension","cancel"]
+  });
+});
+</script>
+
+```{r setup, include=FALSE}
+options(width = 90)
+library(knitr)
+library(rgl)
+knit_hooks$set(rgl = hook_plot_custom)
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar = c(4, 4, .1, .1), las = 1)  # smaller margin on top and right
+})
+hook_output <- knit_hooks$get("output")
+knit_hooks$set(output = function(x, options) {
+  lines <- options$output.lines
+  if (is.null(lines)) {
+    return(hook_output(x, options))  # pass to default hook
+  }
+  x <- unlist(strsplit(x, "\n"))
+  more <- "..."
+  if (length(lines)==1) {        # first n lines
+    if (length(x) > lines) {
+      # truncate the output, but add ....
+      x <- c(head(x, lines), more)
+    }
+  } else {
+    x <- c(more, x[lines], more)
+  }
+  # paste these lines together
+  x <- paste(c(x, ""), collapse = "\n")
+  hook_output(x, options)
+})
+library(rstan)
+options(mc.cores = parallel::detectCores())
+```
+
+## HW1, Question 1
+
+- Empirical "statistical" practice historically is based on two conventions:
+  
+    1. Reject the null hypothesis that $\theta = \theta_0$ if and only if the
+      realization of the $p$-value is less than $0.05$.
+    2. If you fail to reject the null hypothesis that $\theta = \theta_0$,
+      proceed as if $\theta = \theta_0$. If you reject the null hypothesis
+      that $\theta = \theta_0$ in favor of the alternative hypothesis that
+      $\theta \neq \theta_0$, either proceed as if
+      
+          * $\theta = \widehat{\theta}$
+          * $\theta \thicksim \mathcal{N}\left(\widehat{\theta},\widehat{\text{se}}\right)$
+      
+> - Many criticisms can (and have, mostly by Bayesians, for decades) be made against
+  these two conventions, but the conventions are not Frequentist
+  
+## HW1, Question 2
+
+- From a Frequentist or supervised learning perspective, it does not make
+  sense to think about $\mu$ for one period of time, like the first quarter of $2022$
+- Nevertheless, tons of people are thinking about exactly that, albeit not from a
+  Bayesian perspective. See the [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q1-2022)
+- Choosing a normal prior for $\mu$, like $\mathcal{N}\left(1.8, 2.15\right)$
+  is not difficult, which can then be used to draw from the prior predictive distribution
+
+```{r, message = FALSE, fig.show='hide'}
+library(dplyr); library(ggplot2)
+m <- 1.8; s <- 2.15; sigma <- 7 / 3; rho <- -1 / 10
+tibble(mu = rnorm(10^5, mean = m, sd = s),
+       GDI = rnorm(10^5, mean = mu, sd = sigma),
+       GDP = rnorm(10^5, mean = mu + rho * (GDI - mu), 
+                   sd = sigma * sqrt(1 - rho^2))) %>%
+  ggplot() + geom_bin_2d(aes(x = GDI, y = GDP))
+```
+
+## Plot from Previous Slide
+
+```{r, echo = FALSE, fig.height=5, fig.width=10}
+tibble(mu = rnorm(10^5, mean = m, sd = s),
+       GDI = rnorm(10^5, mean = mu, sd = sigma),
+       GDP = rnorm(10^5, mean = mu + rho * (GDI - mu), 
+                   sd = sigma * sqrt(1 - rho^2))) %>%
+  ggplot() + geom_bin_2d(aes(x = GDI, y = GDP))
+```
+
+## HW1, Question 2: Posterior Distribution
+
+- You can numerically evaluate the denominator of Bayes Rule
+$$f\left(\cancel{\mu} \bigcap \text{GDP} \bigcap \text{GDI} \mid m, s, \sigma, \rho\right) = \\
+\int_{-\infty}^\infty \frac{e^{-\frac{1}{2}\left(\frac{\mu - m}{s}\right)^2}}{s\sqrt{2\pi}}
+\frac{e^{-\frac{1}{2}\left(\frac{\text{GDP} - \mu}{\sigma}\right)^2}}{\sigma\sqrt{2\pi}}
+\frac{e^{-\frac{1}{2}\left(\frac{\text{GDI} - \left(\mu + \rho\left(\text{GDP} - \mu\right)\right)}{\sigma\sqrt{1 - \rho^2}}\right)^2}}{\sigma\sqrt{1 - \rho^2}\sqrt{2\pi}}d\mu$$
+
+> - However, in this case, the integrals can be evaluated "analytically"
+> - Conditional on GDP alone, the posterior distribution of $\mu$ is 
+$\mathcal{N}\left(m^\ast, s^\ast\right)$ where 
+$m^\ast = m\frac{\sigma^2}{s^2 + \sigma^2} + \text{GDP}\frac{s^2}{s^2 + \sigma^2}$ and
+$s^\ast = s\sigma\sqrt{\frac{1}{s^2 + \sigma^2}}$. Conditional on both GDP and GDI,
+$m^\ast = m\frac{\left(1 + \rho\right)\sigma^2}
+{2 s^2 + \left(1 + \rho\right)\sigma^2} + 
+\text{GDO} \frac{2 s^2}{2 s^2 + \left(1 + \rho\right)\sigma^2}$ and
+$s^\ast = s \sigma \sqrt{\frac{1 + \rho}{2s^2 + \left(1 + \rho\right)\sigma^2}}$.
+As $s\uparrow \infty, m^\ast \rightarrow \text{GDO} = \frac{\text{GDP} + \text{GDI}}{2}$.
+
+## HW1, Question 3
+
+- You already had Stan code for this problem because it is the same as in the
+  vaccination / Trump model. You just need to choose different GLD priors that
+  are appropriate for the individual stock you choose, here GameStop.
+```{r, include = FALSE, eval = FALSE}
+library(tidyquant) # you may have to first install this package 
+
+# short-term U.S. government bonds are essentially "risk-free"
+R_f <- tq_get("SGOV", from = "2020-06-01", to = "2022-04-01") %>%
+  filter(weekdays(date) == "Wednesday") %>%
+  transmute(R_f = (adjusted - lag(adjusted)) / lag(adjusted)) %>%
+  na.omit %>%
+  pull
+
+# the S&P500 is essentially "the market"
+R_m <- tq_get("SPY", from = "2020-06-01", to = "2022-04-01") %>%
+  filter(weekdays(date) == "Wednesday") %>%
+  transmute(R_m = (adjusted - lag(adjusted)) / lag(adjusted)) %>%
+  na.omit %>%
+  pull
+```
+```{r, eval = FALSE}
+R_i <- tq_get("GME", from = "2020-06-01", to = "2022-04-01") %>%
+  filter(weekdays(date) == "Wednesday") %>%
+  transmute(R_i = (adjusted - lag(adjusted)) / lag(adjusted)) %>%
+  na.omit %>%
+  pull
+```
+
+- $\alpha$ should have a prior median of about zero
+- On average across all companies, $\beta = 1$ under the CAPM,
+  but that might not hold for individual companies. It is 
+  hard to justify $\beta < 0$ for a long investment, but
+  the right tail is long for "meme stocks".
+- The marginal standard deviation of $R_i$ can be used
+  as an upper bound on the standard deviation of the errors,
+  which would be achieved if $\beta = 0$
+
+## What Are Hierarchical Models
+
+* In Bayesian terms, a hierarchical model is nothing more than a model where the prior distribution
+  of some parameter depends on another parameter
+* In other words, it is just another application of the Multiplication Rule
+$$f\left(\boldsymbol{\theta}\right) = \int f\left(\boldsymbol{\theta} \mid \boldsymbol{\phi}\right)
+  f\left(\boldsymbol{\phi}\right) d\phi_1 \dots d\phi_K$$
+* But most of the discussion of "hierarchical models" refers to the very narrow circumstances
+  in which they can be estimated via Frequentist methods
+* From a Frequentist perspective, a hierarchical model is appropriate for 
+  cluster random sampling designs, inappropriate for stratified random
+  sample designs, and hard to justify for other sampling designs
+
+## Prior Predictive Distribution of Hierarchical Model
+
+* Here is how McElreath does many hierarchical binomial models
+* Suppose a categorical predictor $x_k$ has $K$ levels
+$$
+\sigma \thicksim \mathcal{E}\left(r\right) \\
+\forall k: \beta_k \thicksim \mathcal{N}\left(m_k, \sigma\right) \\
+\forall k: \mu_k = \frac{1}{1 + e^{-\beta_k}} \\
+\forall k: y_k \thicksim \text{Binomial}\left(n_k, \mu_k\right)
+$$
+* Aggregating Bernoulli random variables with a common success probability to
+  binomial random variables is much more computationally efficient
+
+## Cluster Sampling vs. Stratified Sampling
+
+* For cluster random sampling, you
+
+  * Sample $J$ large units (such as schools) from their population
+  * Sample $N_j$ small units (such as students) from the $j$-th large unit
+
+* If you replicate such a study, you get different realizations of the large units
+* For stratified random sampling, you
+
+  * Divide the population of large units into $J$ mutually exclusive and exhaustive groups (like states)
+  * Sample $N_j$ small units (such as voters) from the $j$-th large unit
+
+* If you replicate such a study, you would use the same large units and only
+  get different realizations of the small units
+
+## Why Bayesians Should Use Hierarchical Models
+
+* Suppose you estimated a Bayesian model on people in New York
+* Next, you are going to collect data on people who live in Connecticut
+* Intuitively, the New York posterior should influence the Connecticut prior
+* But it is unlikely that the data-generating processes in Connecticut is exactly the
+  same as in New York
+* Hierarchical models apply when you have data from New York, Connecticut, and other
+  states at the same time
+* Posterior distribution in any one state is not independent of other states
+* Posterior distribution in any one state are not the same as in other states
+* McElreath argues hierarchical models should be the default and "flat" models
+  should be the rare exception only when justified by the data
+* With more data, there is always more heterogeneity in the data-generating processes
+  that a generative model should be allowing for
+
+## Models with Group-Specific Intercepts
+
+- Let $\alpha$ be the common intercept and $\boldsymbol{\beta}$ be the common coefficients while
+  $a_j$ is the deviation from the common intercept in the $j$-th group. Write a model as:
+$$y_{ij} = \overbrace{\underbrace{\alpha + \sum_{k = 1}^K \beta_k x_{ik}}_{\text{Frequentist }
+\boldsymbol{\mu} \mid \mathbf{x}}+a_j}^{\text{Bayesian } \boldsymbol{\mu} \mid \mathbf{x},j} +\boldsymbol{\epsilon} = \alpha + \sum_{k = 1}^K \beta_k x_{ik}+\underbrace{a_j + \overbrace{\boldsymbol{\epsilon}}^{\text{Bayesian error}}}_{\text{Frequentist error}}$$
+- The same holds in GLMs where $\eta_{ij} = \alpha + \sum_{k = 1}^K \beta_k x_{ik} + a_j$ 
+  or $\eta_{ij} = \alpha + \sum_{k = 1}^K \beta_k x_{ik}$ depending on whether you are
+  Bayesian or Frequentist
+- Many people write $\alpha_j \equiv \alpha + a_j$
+
+## Models with Group-Specific Slopes and Intercepts
+  
+- Let $\alpha$ be the common intercept and $\boldsymbol{\beta}$ be the common coefficients while
+  $a_j$ and $\mathbf{b}_j$ are the deviations from the common intercept and slope respectively:
+$$y_{ij} = \overbrace{\underbrace{\alpha + \sum_{k = 1}^K \beta_k x_{ik}}_{\text{Frequentist }
+\boldsymbol{\mu} \mid \mathbf{x}} + a_j + \sum_{k = 1}^K b_{jk} x_{ik}}^{\text{Bayesian } \boldsymbol{\mu} \mid \mathbf{x},j} +\boldsymbol{\epsilon} = \\ \alpha + \sum_{k = 1}^K \beta_k x_{ik}+\underbrace{a_j + \sum_{k = 1}^K b_{jk} x_{ik} + \overbrace{\boldsymbol{\epsilon}}^{\text{Bayesian error}}}_{\text{Frequentist error}}$$
+- And similarly for GLMs, but you need a joint prior on $a_j, b_j$
+
+## Data for a Binomial GLM
+
+```{r, message = FALSE}
+funding <- 
+  tibble(
+    discipline   = rep(c("Chemical sciences", "Physical sciences", "Physics", "Humanities", 
+                         "Technical sciences",  "Interdisciplinary", "Earth/life sciences", 
+                         "Social sciences", "Medical sciences"),
+                     each = 2) %>% as.factor,
+    female       = rep(0:1, times = 9),
+    applications = c(83, 39, 135, 39, 67, 9, 230, 166, 189, 
+                     62, 105, 78, 156, 126, 425, 409, 245, 260),
+    awards       = c(22, 10, 26, 9, 18, 2, 33, 32, 30, 
+                     13, 12, 17, 38, 18, 65, 47, 46, 29)
+  )
+stan_data <- with(funding, list(N = nrow(funding), J = nlevels(discipline),
+                                       discipline = as.integer(discipline), female = female,
+                                       applications = applications, awards = awards,
+                                       prior_only = 0, m = 0, s = 1))
+```
+
+> - How would we write the Stan program?
+
+## Data Block of a Stan Program
+
+```{stan output.var="data_block", eval = FALSE}
+data {
+  int<lower = 0> N; // number of observations
+  int<lower = 1> J; // number of disciplines
+  int<lower = 1, upper = J> discipline[N];
+  vector<lower = 0, upper = 1>[N] female;
+  int<lower = 0> applications[N];
+  int<lower = 0, upper = max(applications)> awards[N];
+  
+  int<lower = 0, upper = 1> prior_only;
+  real m;            // prior me{di}an
+  real<lower = 0> s; // prior standard deviation
+}
+```
+
+## Special Matrices
+
+- A square matrix has the same number of rows as columns
+- A square matrix $\mathbf{X}$ is symmetric iff $\mathbf{X}=\mathbf{X}^{\top}$
+- Triangular matrices are square matrices such that
+    - Lower triangular matrix has $X_{kp}=0\,\forall k<p$
+    - Upper triangular matrix has $X_{kp}=0\,\forall k>p$
+- Diagonal matrix is a square matrix that is simultaneously lower and
+upper triangular and thus has $X_{kp}=0\,\forall k\neq p$
+- The identity matrix, $\mathbf{I}$, is the diagonal matrix with only
+ones on its diagonal --- i.e.  $I_{kp}=\begin{cases}
+1 & \mbox{if }k=p\\
+0 & \mbox{if }k\neq p
+\end{cases}$ --- and is the matrix analogue of the scalar $1$
+- If $\mathbf{X}$ is square, then $\mathbf{X}\mathbf{I}=\mathbf{X}=\mathbf{I}\mathbf{X}$
+- A square orthogonal matrix $\mathbf{Q}$ is such that $\mathbf{Q}^\top \mathbf{Q} = \mathbf{I} = \mathbf{Q} \mathbf{Q}^\top$, but sometimes we refer to a rectangular matrix as having orthogonal columns if 
+$\mathbf{Q}^\top \mathbf{Q} = \mathbf{I}$
+
+## Matrix Inversion
+
+- If $\mathbf{X}$ is a square matrix, then the inverse of $\mathbf{X}$
+--- if it exists --- is denoted $\mathbf{X}^{-1}$ and is the unique
+matrix of the same size such that $\begin{eqnarray*}
+\mathbf{X}\mathbf{X}^{-1}= & \mathbf{I} & =\mathbf{X}^{-1}\mathbf{X}
+\end{eqnarray*}$
+- Don't worry about how software finds the elements of $\mathbf{X}^{-1}$, just use
+  `solve` in R or various functions in Stan
+    - But if $\mathbf{X}$ is diagonal, then $\left[\mathbf{X}^{-1}\right]_{kp}=\begin{cases}
+\frac{1}{X_{kp}} & \mbox{if }k=p\\
+0 & \mbox{if }k\neq p
+\end{cases}$
+    - If $\mathbf{X}$ is only triangular, $\mathbf{X}^{-1}$ is also triangular and easy to find
+- There is no vector or matrix "division" but multiplying $\mathbf{X}$ by $\mathbf{X}^{-1}$
+is the matrix analogue of scalar multiplying $a$ by $\frac{1}{a}$.
+Also, $\left(\mathbf{X}a\right)^{-1}=\frac{1}{a}\mathbf{X}^{-1}$.
+- An inverse of a product of square matrices equals the product of the
+inverses in reverse order: $\left(\mathbf{X}\mathbf{Y}\right)^{-1}=\mathbf{Y}^{-1}\mathbf{X}^{-1}$. Also, 
+the inverse of a transpose of a square matrix is the transpose of the
+inverse: $\left(\mathbf{X}^{\top}\right)^{-1}=\left(\mathbf{X}^{-1}\right)^{\top}$
+
+## Covariance and Correlation Matrices
+
+
+- Recall that if $g\left(X_{i},X_{j}\right)=\left(X_{i}-\mu_{i}\right)\left(X_{j}-\mu_{j}\right)$, then
+\vspace{-0.2in}
+$$\begin{eqnarray*}
+\mathbb{E}g\left(X_{i},X_{j}\right) & = & \int_{\Omega_{X_{j}}}\int_{\Omega_{X_{i}}}\left(x_{i}-\mu_{i}\right)\left(x_{j}-\mu_{j}\right)
+f\left(x_{i},x_{j}\right)dx_{i}dx_{j}=\sigma_{ij}
+\end{eqnarray*}$$
+
+is the covariance between $X_{i}$ and $X_{j}$, while $\rho_{ij}=\frac{\sigma_{ij}}{\sigma_{i}\sigma_{j}}\in\left[-1,1\right]$
+is their correlation, which is a measure of LINEAR dependence
+
+- Let $\boldsymbol{\Sigma}$ and $\boldsymbol{\Lambda}$  be $K\times K$, such that
+$\Sigma_{ij}=\sigma_{ij}\,\forall i,j$ and $\Lambda_{ij} = \rho_{ij}\,\forall i\neq j$
+    - Since $\sigma_{ij}=\sigma_{ji}\,\forall i,j$, $\boldsymbol{\Sigma}=\boldsymbol{\Sigma}^{\top}$
+    is symmetric
+    - Since $\sigma_{ij}=\sigma_{i}^{2}$ iff $i=j$, $\Sigma_{ii}=\sigma_{i}^{2}>0$
+    - Hence, $\boldsymbol{\Sigma} = 
+    \mathbb{E}\left(\mathbf{x} - \boldsymbol{\mu}\right)\left(\mathbf{x} - \boldsymbol{\mu}\right)^\top$ 
+    is the variance-covariance matrix of $\mathbf{x}$
+    - $\boldsymbol{\Sigma}=\boldsymbol{\Delta}\boldsymbol{\Lambda}\boldsymbol{\Delta}$
+where $\boldsymbol{\Delta}$ is a diagonal matrix of standard deviations
+
+## Multivariate CDFs, PDFs, and Expectations {.smaller}
+
+- If $\mathbf{x}$ is a $K$-vector of continuous random variables
+$$\begin{eqnarray*}
+F\left(\mathbf{x}\right) & = & \Pr\left(X_{1}\leq x_{1}\bigcap X_{2}\leq x_{2}\bigcap\cdots\bigcap X_{K}\leq x_{K}\right)\\
+f\left(\mathbf{x}\right) & = & \frac{\partial^{K}F\left(\mathbf{x}\right)}{\partial x_{1}\partial x_{2}\cdots\partial x_{K}}=f_1\left(x_{1}\right)\prod_{k=2}^{K}f_k\left(\left.x_{k}\right|x_{1},\ldots,x_{k-1}\right)\\
+F\left(\mathbf{x}\right) & = & \int_{-\infty}^{x_{k}}\cdots\int_{-\infty}^{x_{2}}\int_{-\infty}^{x_{1}}f\left(\mathbf{x}\right)dx_{1}dx_{2}\cdots dx_{K}
+\end{eqnarray*}$$
+$$\begin{eqnarray*}
+\mathbb{E}g\left(\mathbf{x}\right) & = & \int_{-\infty}^{\infty}\cdots\int_{-\infty}^{\infty}\int_{-\infty}^{\infty}g\left(\mathbf{x}\right)f\left(\mathbf{x}\right)dx_{1}dx_{2}\cdots dx_{K}\\
+\boldsymbol{\mu}^{\top} & = & \mathbb{E}\mathbf{x}^{\top}=\begin{bmatrix}\mathbb{E}X_{1} & \mathbb{E}X_{2} & \cdots & \mathbb{E}X_{K}\end{bmatrix}\\
+\boldsymbol{\Sigma}^{\top}=\boldsymbol{\Sigma} & = & \mathbb{E}\left[\left(\mathbf{x}-\boldsymbol{\mu}\right)\left(\mathbf{x}-\boldsymbol{\mu}\right)^{\top}\right]=\begin{bmatrix}\sigma_{1}^{2} & \sigma_{12} & \cdots & \sigma_{1K}\\
+\sigma_{12} & \sigma_{2}^{2} & \cdots & \vdots\\
+\vdots & \cdots & \ddots & \sigma_{\left(K-1\right)K}\\
+\sigma_{1K} & \cdots & \sigma_{\left(K-1\right)K} & \sigma_{K}^{2}
+\end{bmatrix}
+\end{eqnarray*}$$
+
+## Determinants
+
+- A determinant is "like" a multivariate version of the absolute
+value operation and is denoted with the same symbol, $\left|\mathbf{X}\right|$
+- Iff $\left|\mathbf{X}\right|\neq0$, then $\mathbf{X}^{-1}$ exists
+and $\left|\mathbf{X}^{-1}\right|=\frac{1}{\left|\mathbf{X}\right|}$
+- All you need to know about how determinants are calculated:
+    * Any square matrix $\mathbf{X}$ can be factored as 
+    $\mathbf{X} = \dot{\mathbf{L}} \mathbf{U}$ where
+    $\dot{\mathbf{L}}$ is unit lower triangular and $\mathbf{U}$ is upper triangular. For
+    covariance matrices, there are further computational shortcuts.
+    * Determinant of a product of square matrices is
+    equal to the product of their determinants
+    * Determinant of a triangular matrix is the product of its
+    diagonal elements
+    * Thus, $\left|\mathbf{X}\right| = \left|\dot{\mathbf{L}}\right| \times 
+      \left|\mathbf{U}\right| = \prod_{k = 1}^K U_{kk}$
+      
+## Multivariate Transformations
+
+- Most multivariate distributions are generated by transforming independent random variables from some distribution
+- If $\mathbf{z}$ is a $K$-vector with PDF $f\left(\mathbf{z}\right)=\frac{\partial^{K}F\left(\mathbf{z}\right)}{\partial z_{1}\partial z_{2}\cdots\partial z_{K}}$
+and $\mathbf{x}\left(\mathbf{z}\right)$ is an bijective $\mathbb{R}^{K}\mapsto\mathbb{R}^{K}$
+function of $\mathbf{z}$, what is the PDF of $\mathbf{x}$?
+
+- $f\left(\left.\mathbf{x}\right|\cdot\right)=\frac{\partial^{K}F\left(\mathbf{z}\right)}{\partial z_{1}\partial z_{2}\cdots\partial z_{K}}\times\text{ChainRule}\left(\mathbf{x}\mapsto\mathbf{z}\right)=f\left(\left.\mathbf{z\left(x\right)}\right|\cdot \right)\times\left|\mathbf{J}_{\mathbf{x}\mapsto\mathbf{z}}\right|$
+where the Jacobian matrix is $\mathbf{J}_{\mathbf{x}\mapsto\mathbf{z}}=\begin{bmatrix}\frac{\partial z_{1}}{\partial x_{1}} & \frac{\partial z_{1}}{\partial x_{2}} & \cdots & \frac{\partial z_{1}}{\partial x_{K}}\\
+\frac{\partial z_{2}}{\partial x_{1}} & \frac{\partial z_{2}}{\partial x_{2}} & \cdots & \frac{\partial z_{2}}{\partial x_{K}}\\
+\vdots & \vdots & \vdots & \vdots\\
+\frac{\partial z_{K}}{\partial x_{1}} & \frac{\partial z_{K}}{\partial x_{2}} & \cdots & \frac{\partial z_{K}}{\partial x_{K}}
+\end{bmatrix}$
+
+## Bivariate Normal Distribution with Linear Algebra {.smaller}
+
+- Let $\mathbf{L}=\begin{bmatrix}\sigma_{1} & 0\\
+\rho \sigma_2 & \sigma_{2}\sqrt{1-\rho^{2}}
+\end{bmatrix}$ and let $Z_{1}$ and $Z_{2}$ be iid standard normal
+- If $\mathbf{z}=\begin{bmatrix}z_{1}\\
+z_{2}\end{bmatrix}$ and
+$\begin{bmatrix}x_{1}\\
+x_{2}
+\end{bmatrix}=\mathbf{x}\left(\mathbf{z}\right)=\boldsymbol{\mu}+\mathbf{L}\mathbf{z}$, what is
+the distribution of $\mathbf{x}$?
+
+>- $\begin{bmatrix}x_{1}\left(\mathbf{z}\right)\\
+x_{2}\left(\mathbf{z}\right)
+\end{bmatrix}=\begin{bmatrix}\mu_{1}\\
+\mu_{2}
+\end{bmatrix}+\begin{bmatrix}\sigma_{1}z_{1}+0z_{2}\\
+\rho \sigma_2 z_{1}+\sigma_{2}\sqrt{1-\rho^{2}}z_{2}
+\end{bmatrix} \implies \begin{bmatrix}z_{1}\left(\mathbf{x}\right)\\
+z_{2}\left(\mathbf{x}\right)
+\end{bmatrix}=\begin{bmatrix}\frac{x_{1}-\mu_{1}}{\sigma_{1}}\\
+\frac{x_{2}-\mu_2 - \rho \sigma_2\left(\frac{x_{1}-\mu_{1}}{\sigma_{1}}\right)}{\sigma_{2}\sqrt{1-\rho^{2}}}
+\end{bmatrix}$
+>- $\mathbf{J}=\begin{bmatrix}\frac{\partial z_{1}}{\partial x_{1}} & \frac{\partial z_{1}}{\partial x_{2}}\\
+\frac{\partial z_{2}}{\partial x_{1}} & \frac{\partial z_{2}}{\partial x_{2}}
+\end{bmatrix}=\begin{bmatrix}\frac{1}{\sigma_{1}} & 0\\
+-\frac{\rho\frac{\sigma_{2}}{\sigma_{1}}}{\sigma_2\sqrt{1-\rho^{2}}} & \frac{1}{\sigma_2\sqrt{1-\rho^{2}}}
+\end{bmatrix}$ so $\left|\mathbf{J}\right|=\frac{1}{\sigma_{1}\sigma_2\sqrt{1-\rho^{2}}}$
+>- $f\left(\left.\mathbf{x}\right|\mu_1, \mu_2, \sigma_1, \sigma_2, \rho\right) = 
+  \frac{1}{\sigma_1\sqrt{2\pi}}e^{-\frac{1}{2}\left(\frac{x_1 - \mu_1}{\sigma_1}\right)^2} \times
+  \frac{1}{\sigma_{2}\sqrt{1-\rho^{2}}\sqrt{2\pi}}e^{-\frac{1}{2}\left(\frac{x_{2}-\left(\mu_2 + \rho\frac{\sigma_{2}}{\sigma_{1}}
+  \left(x_{1}-\mu_{1}\right)\right)}{\sigma_2\sqrt{1-\rho^2}}\right)^2}$, which is the PDF of the bivariate
+  normal distribution we learned before, written as a product of a marginal normal PDF for
+  $x_1$ and a conditional normal PDF for $\left.x_2\right|x_1$
+  
+## Multivariate Normal Distribution
+
+- If $Z_{k}$ is iid standard normal for all $k$ and $\mathbf{x}\left(\mathbf{z}\right)=\boldsymbol{\mu}+\mathbf{L}\mathbf{z}$
+with $L_{kk}>0\,\forall k$ and $L_{ij}=0\,\forall j>i$ , what is
+the distribution of $\mathbf{x}$?
+
+>- Step 1: $\mathbf{z}\left(\mathbf{x}\right) = \mathbf{L}^{-1}\left(\mathbf{x} - \boldsymbol{\mu}\right)$ so
+  $z_i\left(\mathbf{x}\right) = \sum_{k = 1}^i L_{ij}^{-1} \left(x_j - \mu_j\right)$
+>- Step 2: $\frac{\partial z_i}{\partial x_j} = L_{ij}^{-1}\, \forall i,j$ so 
+  $\mathbf{J}_{\mathbf{x}\mapsto\mathbf{z}}=\mathbf{L}^{-1}$
+and $\left|\mathbf{J}_{\mathbf{x}\mapsto\mathbf{z}}\right|=\prod_{k=1}^{K}\frac{1}{L_{kk}}=\frac{1}{\left|\mathbf{L}\right|}$
+>- Step 3: $f\left(\left.\mathbf{x}\right|\boldsymbol{\mu},\mathbf{L}\right)=f\left(\mathbf{z}\left(\mathbf{x}\right)\right) \times \left|\mathbf{L}^{-1}\right|=\frac{f\left(\mathbf{z}\left(\mathbf{x}\right)\right)}{\left|\mathbf{L}\right|}$
+>- Step 4: $f\left(\mathbf{z}\right)=\prod_{k=1}^{K}\frac{1}{\sqrt{2\pi}}e^{-\frac{1}{2}z_{k}^{2}}=\frac{1}{\left(2\pi\right)^{\frac{K}{2}}}e^{-\frac{1}{2}\sum_{k=1}^{K}z_{k}^{2}}=\frac{1}{\left(2\pi\right)^{\frac{K}{2}}}e^{-\frac{1}{2}\mathbf{z}^{\top}\mathbf{z}}$
+>- Step 5: Substituting for $\mathbf{z}\left(\mathbf{x}\right)$, $f\left(\left.\mathbf{x}\right|\boldsymbol{\mu},\mathbf{L}\right)=\frac{e^{-\frac{1}{2}\left(\mathbf{x}-\boldsymbol{\mu}\right)^{\top}\left(\mathbf{L}^{-1}\right)^{\top}\mathbf{L}^{-1}\left(\mathbf{x}-\boldsymbol{\mu}\right)}}{\left(2\pi\right)^{\frac{K}{2}}\left|\mathbf{L}\right|}$
+and substituting $\boldsymbol{\Sigma}=\mathbf{L}\mathbf{L}^{\top}$,
+$f\left(\left.\mathbf{x}\right|\boldsymbol{\mu},\boldsymbol{\Sigma}\right)=\frac{e^{-\frac{1}{2}\left(\mathbf{x}-\boldsymbol{\mu}\right)^{\top}\boldsymbol{\Sigma}^{-1}\left(\mathbf{x}-\boldsymbol{\mu}\right)}}{\left(2\pi\right)^{\frac{K}{2}}\left|\boldsymbol{\Sigma}\right|^{\frac{1}{2}}}$
+
+## Cholesky Factors and Positive Definiteness
+
+- Let $\mathbf{L}$ be lower triangular w/ positive diagonal entries
+such that $\mathbf{L}\mathbf{L}^{\top}=\boldsymbol{\Sigma}$, which is a 
+Cholesky factor of $\boldsymbol{\Sigma}$ and can uniquely be defined via recursion:
+$$\begin{eqnarray*}
+L_{ij} & = & \begin{cases}
+\sqrt[+]{\Sigma_{jj}-\sum_{k=1}^{j-1}L_{kj}^{2}} & \mbox{if }i=j\\
+\frac{1}{L_{jj}}\left(\Sigma_{ij}-\sum_{k=1}^{j-1}L_{ik}L_{jk}\right) & \mbox{if }i>j\\
+0 & \mbox{if }i<j
+\end{cases}
+\end{eqnarray*}$$
+- Positive definiteness of $\boldsymbol{\Sigma}$ implies $L_{jj}$
+is real and positive for all $j$ and implies the existence of $\boldsymbol{\Sigma}^{-1}=\mathbf{L}^{-1}\left(\mathbf{L}^{-1}\right)^{\top}$,
+which is called a "precision matrix". But not all symmetric matrices
+are positive definite, so $\Theta\subset\mathbb{R}^{K+{K \choose 2}}$ in this case
+- The `cholesky_decompose` function in Stan outputs $\mathbf{L}$, while the `chol` function 
+  in R outputs $\mathbf{L}^{\top}$ instead
+
+## The LKJ Distribution for Correlation Matrices
+
+- Let $\boldsymbol{\Delta}$ be a $K\times K$ diagonal matrix such
+that $\Delta_{kk}$ is the $k$-th standard deviation, $\sigma_{k}$,
+and let $\boldsymbol{\Lambda}$ be a correlation matrix
+- Formulating a prior for $\boldsymbol{\Sigma}=\boldsymbol{\Delta}\boldsymbol{\Lambda}\boldsymbol{\Delta}$
+is harder than putting a prior on $\boldsymbol{\Delta}$ & $\boldsymbol{\Lambda}$
+- LKJ PDF is $f\left(\left.\boldsymbol{\Lambda}\right|\eta\right)=\frac{1}{c\left(K,\eta\right)}\left|\boldsymbol{\Lambda}\right|^{\eta-1}=\left|\mathbf{L}\right|^{2\left(\eta-1\right)}$
+where $\boldsymbol{\Lambda}=\mathbf{L}\mathbf{L}^{\top}$ with $\mathbf{L}$
+a Cholesky factor and $c\left(K,\eta\right)$ is the normalizing constant
+that forces the PDF to integrate to $1$ over the space of correlation matrices
+    - Iff $\eta=1$, $f\left(\left.\boldsymbol{\Lambda}\right|\eta\right)=\frac{1}{c\left(K,\eta\right)}$ is constant
+    - If $\eta>1$, the mode of $f\left(\left.\boldsymbol{\Lambda}\right|\eta\right)$ is at $\mathbf{I}$ and as $\eta\uparrow\infty$, $\boldsymbol{\Lambda}\rightarrow\mathbf{I}$
+    - If $0<\eta<1$, trough of $f\left(\left.\boldsymbol{\Lambda}\right|\eta\right)$ is at $\mathbf{I}$, which is 
+    an odd thing to believe
+- Can also derive the distribution of the Cholesky factor $\mathbf{L}$ such that $\mathbf{L}\mathbf{L}^\top$ is
+  a correlation matrix with an LKJ$\left(\eta\right)$ distribution
+
+## Frequentist Estimation of Multilevel Models
+
+- Frequentists assume that $a_j$ and $b_j$ deviate from the common parameters according
+  to a (multivariate) normal distribution, whose (co)variances are common parameters
+  to be estimated
+- To Frequentists, $a_j$ and $b_j$ are not parameters because parameters must remained
+  fixed in repeated sampling of observations from some population
+- Since $a_j$ and $b_j$ are not parameters, they can't be "estimated" only "predicted"
+- Since $a_j$ and $b_j$ aren't estimated, they must be integrated out of
+  the likelihood function, leaving an integrated likelihood function of the common
+  parameters
+- After obtaining maximum likelihood estimates of the common parameters, each
+  $a_j$ and $b_j$ can be predicted from the residuals via a regression
+- Estimated standard errors produced by frequentist software are too small
+- There are no standard errors etc. for the $a_j$ and $b_j$
+- Maximum likelihood estimation often results in a corner solution
+
+## Frequentist Example
+
+```{r, message = FALSE, warning = FALSE}
+poll <- readRDS("GooglePoll.rds") # WantToWin is coded as 1 for Romney and 0 for Obama
+poll$Income[poll$Income == "150,000+"] <- "100,000-149,999"
+library(dplyr)
+collapsed <- filter(poll, !is.na(WantToWin)) %>%
+             group_by(Region, Gender, Urban_Density, Age, Income) %>%
+             summarize(Romney = sum(grepl("Romney", WantToWin)), Obama = n() - Romney) %>%
+             na.omit
+```
+```{r, glmer, cache = TRUE, results = "hide", warning = FALSE}
+mle <- lme4::glmer(cbind(Romney, Obama) ~ Gender + Urban_Density + Age + Income +
+                    (Gender + Urban_Density + Age + Income | Region),
+                   data = collapsed, family = binomial(link = "logit"))
+```
+
+> - For models that are more complicated than `(1 + x | g)`, the MLE of $\boldsymbol{\Sigma}$ 
+  usually implies that $\widehat{\boldsymbol{\Sigma}}^{-1}$ does not exist. How can we do it with Stan?
+
+## Stuff for the Data Block
+
+```{r, message = FALSE}
+library(lme4)
+X <- model.matrix(mle)[ , -1]
+Z <- getME(mle, name = "Z")
+class(Z)
+parts <- extract_sparse_parts(Z)
+str(parts)
+```
+
+## Data for Hierarchical Model of Bowling
+
+```{r}
+ROOT <- "https://www.cs.rpi.edu/academics/courses/fall14/csci1200/"
+US_Open2010 <- readLines(paste0(ROOT, "hw/02_bowling_classes/2010_US_Open.txt"))
+x1_x2 <- lapply(US_Open2010, FUN = function(x) {
+  pins <- scan(what = integer(), sep = " ", quiet = TRUE,
+               text = sub("^[a-zA-Z_ \']+(.*$)", "\\1", x))
+  results <- matrix(NA_integer_, 10, 2)
+  pos <- 1
+  for (f in 1:10) {
+    x1 <- pins[pos]
+    if (x1 == 10) results[f, ] <- c(x1, 0L)
+    else {
+      pos <- pos + 1
+      x2 <- pins[pos]
+      results[f, ] <- c(x1, x2)
+    }
+    pos <- pos + 1
+  }
+  return(results)
+}) # 30 element list each with a 10x2 integer array of pins knocked down
+```
+
+## Dirichlet Distribution
+
+- Dirichlet distribution is over the parameter space of PMFs --- i.e. $\pi_k \geq 0$ and 
+  $\sum_{k = 1}^K \pi_k = 1$ --- and the Dirichlet PDF is
+$f\left(\boldsymbol{\pi} \mid \boldsymbol{\alpha}\right) = \frac{1}{B\left(\boldsymbol{\alpha}\right)}\prod_{k=1}^{K}\pi_{k}^{\alpha_{k}-1}$
+where $\alpha_{k}\geq0\,\forall k$ and the multivariate Beta
+function is $B\left(\boldsymbol{\alpha}\right)=\frac{\prod_{k=1}^{K}\Gamma\left(\alpha_{k}\right)}{\Gamma\left(\prod_{k=1}^{K}\alpha_{k}\right)}$
+where $\Gamma\left(z\right)= \frac{1}{z} \prod_{n = 1}^\infty \frac{\left(1 + \frac{1}{n}\right)^n}
+{1 + \frac{z}{n}} = \int_{0}^{\infty}u^{z-1}e^{-u}du$ is the Gamma function
+- $\mathbb{E}\pi_{i}=\frac{\alpha_{i}}{\sum_{k=1}^{K}\alpha_{k}}\,\forall i$
+and the mode of $\pi_{i}$ is $\frac{\alpha_{i}-1}{-1+\sum_{k=1}^{K}\alpha_{k}}$
+if $\alpha_{i}>1$
+- Iff $\alpha_{k}=1\,\forall k$, $f\left(\left.\boldsymbol{\pi}\right|\boldsymbol{\alpha}=\mathbf{1}\right)$
+is constant over $\Theta$ (simplexes)
+- Beta distribution is a special case of the Dirichlet where $K = 2$
+- Marginal and conditional distributions for subsets of $\boldsymbol{\pi}$ are also Dirichlet
+
+## Multilevel Stan Program for Bowling
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("bowling_mlm.stan"))
+```
+
+## Multilevel Posterior Distribution
+
+```{r, post_mlm, cache = TRUE, message = FALSE, warning = FALSE, results = "hide", output.lines = 5:18}
+post_mlm <- stan("bowling_mlm.stan", control = list(adapt_delta = 0.85), refresh = 0,
+                 data = list(J = length(x1_x2), x1_x2 = x1_x2, a = 1:11, s = 10))
+```
+```{r}
+print(post_mlm, pars = "pi", include = FALSE, digits = 2)
+```
+
+## Pairs Plot
+
+```{r, out.width="750px", small.mar = TRUE}
+pairs(post_mlm, pars = c("mu", "pi"), include = FALSE)
+```
