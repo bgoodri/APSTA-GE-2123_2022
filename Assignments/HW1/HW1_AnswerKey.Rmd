@@ -284,7 +284,7 @@ a_s_sigma <- GLD_solver_LBFGS(lower_quartile = 0.25, median = 0.5,
 alpha <- qgld(runif(1000), 
               median = 0, IQR = 2, asymmetry = a_s_alpha[1], steepness = a_s_alpha[2])
 beta  <- qgld(runif(1000), 
-              median = 1, IQR = 2.5, asymmetry = a_s_beta[1], steepness = a_s_beta[2])
+              median = 1, IQR = 1.5, asymmetry = a_s_beta[1], steepness = a_s_beta[2])
 sigma <- qgld(runif(1000), 
               median = 0.5, IQR = 0.65, asymmetry = a_s_sigma[1], steepness = a_s_sigma[2])
 ```
@@ -315,11 +315,11 @@ before observing it.
 library(rstan)
 post <- stan(file.path("..", "..", "Week3", "linear.stan"),
              data = list(N = NROW(R_i), K = 1, X = as.matrix(R_m - R_f),
-                         y = R_i - R_f, prior_only = FALSE,
-                         m = c(alpha = 0, beta = 1, sigma = 0.5),
-                         r = c(alpha = 2, beta = 2.5, sigma = 0.65),
-                         a = c(a_s_alpha[1], a_s_beta[1], a_s_sigma[1]),
-                         s = c(a_s_alpha[2], a_s_beta[2], a_s_sigma[2])))
+                         y = R_i - R_f, prior_only = FALSE, cores = 4,
+                         m = c(beta = 1, alpha = 0, sigma = 0.5),
+                         r = c(beta = 1.5, alpha = 2, sigma = 0.65),
+                         a = c(a_s_beta[1], a_s_alpha[1], a_s_sigma[1]),
+                         s = c(a_s_beta[2], a_s_alpha[2], a_s_sigma[2])))
 ```
 
 ```{r}
@@ -328,7 +328,7 @@ pairs(post, pars = "p", include = FALSE, las = 1)
 
 The posterior distributions of $\alpha$ and $\sigma$ are roughly normal and
 fairly independent of each other. The posterior distribution of $\beta$ is
-right-skewed but not very dependent on other other parameters.
+very skewed but not very dependent on other other parameters.
 
 ## Interpretation
 
