@@ -333,7 +333,7 @@ very skewed but not very dependent on other other parameters.
 ## Interpretation
 
 The posterior distribution of $\beta$ puts considerable probability on it
-being negative, although the third quartile of the posterior distribution is positive
+being close to zero, and it would be negative if the prior did not preclude it
 
 ```{r}
 print(post, pars = "p", include = FALSE)
