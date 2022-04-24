@@ -347,6 +347,10 @@ $\beta$ for GameStop being near or greater than 1, so this posterior
 distribution alone does not provide decisive evidence on the CAPM
 (no individual stock, observed over a short period of time, would).
 
+In addition, the posterior distribution of $\alpha$ is almost entirely
+positive, which is inconsistent with the CAPM and implies that you
+could obtain better than market returns with no greater than market risk.
+
 ## Posterior Predictive Distribution
 
 ```{r}
