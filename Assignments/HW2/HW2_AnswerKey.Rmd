@@ -1,0 +1,268 @@
+---
+title: "APSTA-GE 2123 Assignment 2 Answer Key"
+author: "Due by 1:45 PM on May 4, 2022"
+output: 
+  pdf_document: 
+    number_sections: yes
+urlcolor: red
+editor_options: 
+  chunk_output_type: console
+---
+
+# On data science
+
+Read this [article](https://hbr.org/2012/10/data-scientist-the-sexiest-job-of-the-21st-century).
+What is the relationship between data science and Bayesian analysis? What aspects of Bayesian
+analysis are or are not data science? What parts of data science are outside of Bayesian analysis?
+How does Bayesian analysis as it is commonly understood in the data science realm differ from
+the approach to Bayesian analysis that we have put forward in this course?
+
+If data science were defined as the intersection of three fields, as in this
+[one](http://drewconway.com/zia/2013/3/26/the-data-science-venn-diagram) by Drew Conway
+on the next page, then Bayesian analysis would be the epitome of data science if we associate
+
+![Venn Diagram](Data_Science_VD.png)
+
+- "Math and statistics knowledge" with "using probability"
+- "Substantive expertise" with the "ability to specify a generative model, including priors"
+- "Hacking skills" with "capability with MCMC"
+
+However, many self-identified data scientists have not studied probability formally
+or in enough detail to conduct a Bayesian analysis. Nor are they trained in MCMC
+algorithms, such as Stan. So, whatever substantive expertise they might have in
+an area is not manifesting itself in the choice of prior distributions over the
+parameters. In practice, data science does not seem to be well described by a
+_symmetric_ Venn diagram like that above but rather one the prioritizes hacking
+skills over math and statistics knowledge, which in turn is prioritized over
+substantive expertise.
+
+Self-identified data scientists often claim that a substantial part of their job is 
+collecting data (often from websites), cleaning it efficiently, and putting it into
+a (possibly tidy) format for analysis. Self-identified data scientists also tend to
+expend a great deal of effort creating and maintaining an analysis "pipeline", which
+automates as much of the process as possible as new data becomes available. Neither
+of these are part of the definition of Bayesian analysis, but nor are they inconsistent
+with Bayesian analysis.
+
+However, if data science were defined as the intersection of three fields in the
+Venn diagram above, then one would be hard-pressed to explain why Bayesian analysis
+(especially using MCMC) is so rare among self-identified data scientists. If a Bayesian
+approach is used within data science, it tends to either be as a 
+[classification method](https://en.wikipedia.org/wiki/Naive_Bayes_classifier) that
+utilizes point priors or, rather than using MCMC, approximates a posterior distribution
+using some tractable parametric family.
+
+Data science is often associated with "big data" and priority is given to quantitative
+methods that scale favorably as the number of observations becomes large, not for any
+Frequentist consideration but for practicality. Although the log-kernel can be often
+be evaluated quickly in compiled code like C++, Stan has to evaluate the log-kernel
+millions of times in order to obtain a few thousand draws from the posterior distribution.
+Thus, many self-identified data scientists see MCMC as a non-starter and see Bayesian
+analysis as unnecessary if the large number of observations would make the priors
+irrelevant and the posterior distribution concentrated near its mode.
+
+Hierarchical models are the hallmark of Bayesian analysis and have essentially no
+counterpart in data science. Self-identified data scientists typically follow some
+version of what Hadley Wickham calls the "split-apply-combine" paradigm of quantitative
+analysis, where a (training) dataset is split according to the levels of some (perhaps
+arbitrary) factor(s), a function is applied to the observations in that stratum (often
+in parallel), and then the point estimates or predictions are combined. For example, 
+when using Census data, the data scientist might split by state, apply apply an estimator,
+and combine the state-level estimates. From a Bayesian perspective, this corresponds to
+some "no pooling" model, which typically is worse than a "partial pooling" model that
+allows the data-generating process to vary by state to an unknown degree that is estimated
+along with all of the other unknowns. In essence, the posterior distribution of the
+parameters in one state is influenced by the observations in other states and the
+amount of influence is determined by the data (and the priors).
+
+# YouTube Views
+
+```{r, message = FALSE}
+youtube <- readr::read_csv("https://osf.io/25sz9/download")
+```
+
+## Stan Program
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("negative_binomial.stan"))
+```
+
+Here we had to take care in the `generated quantities` block to avoid integer overflow
+when drawing from the prior predictive distribution. Unless your priors are chosen
+_very_ carefully, it is all-too-easy to put some prior probability on counts that
+are greater than what typical hardware can represent.
+
+
+## Prior Predictive Distribution
+
+```{r}
+source(file.path("..", "..", "Week2", "GLD_helpers.R"))
+```
+
+```{r, warning=FALSE}
+a_s_alpha <- GLD_solver_LBFGS(lower_quartile = 0, median = 5, upper_quartile = 10,
+                              other_quantile = 14, alpha = 0.95)
+a_s_beta  <- GLD_solver(lower_quartile = -0.5, median = 0, upper_quartile = 0.5,
+                        other_quantile = 1, alpha = 0.95)
+a_s_phi <- GLD_solver_LBFGS(lower_quartile = 0.5, median = 2, upper_quartile = 5,
+                            other_quantile = 0, alpha = 0)
+```
+
+```{r, message = FALSE}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+stan_data <- with(youtube, list(N = nrow(youtube), offset = log(age2), K = 1,
+                                X = as.matrix(scol - mean(scol)), y = views,
+                                prior_only = TRUE, m = c(0, 5, 2), r = c(1, 10, 1.5),
+                                a = c(a_s_beta[1], a_s_alpha[1], a_s_phi[1]),
+                                s = c(a_s_beta[2], a_s_alpha[2], a_s_phi[2])))
+```
+
+```{r, prior, cache = TRUE, results = "hide", message = FALSE}
+prior <- stan("negative_binomial.stan", data = stan_data, 
+              seed = 20220504, save_warmup = FALSE, init_r = 0.5)
+```
+
+```{r}
+y_rep <- rstan::extract(prior, pars = "y_rep")[[1]]
+plot(youtube$scol, colMeans(y_rep) / youtube$age2, pch = 20, log = "y",
+     xlab = "Accuracy", ylab = "Average Views", las = 1)
+```
+
+It seems odd that the predictive distribution would be $J$-shaped, so we 
+might want to rethink the priors.
+
+## Expected Log Predictive Density under the Prior
+
+```{r}
+loo(prior)
+```
+
+This is not estimated well enough to be meaningful because all of the
+Pareto $k$ estimates are too high.
+
+## Posterior Distribution
+
+```{r, post, cache = TRUE, results = "hide"}
+stan_data$prior_only <- FALSE
+post <- stan("negative_binomial.stan", data = stan_data, 
+             seed = 20220504, save_warmup = FALSE, init_r = 0.5)
+```
+
+```{r}
+print(post, pars = c("alpha", "beta", "phi"))
+```
+
+The negative binomial model is clearly preferable to the Poisson
+because the posterior distribution of $\phi$ is concentrated
+on small numbers rather than large ones. The fact that almost all of
+the posterior draws of $\beta$ are negative
+
+```{r}
+mean(as.data.frame(post)$beta < 0)
+```
+
+implies that more accurate videos are less watched.
+
+## Expected Log Predictive Density under the Posterior
+
+```{r}
+plot(loo(post), label_points = TRUE)
+loo(post)
+```
+
+All the Pareto $k$ estimates are now fine, although the second observation is 
+borderline, and the estimated ELPD is much higher than the (useless) estimate of it 
+under the prior.
+
+# Vaccination Rates
+
+Revisit the data we used in Week3 on covid vaccinations at the county-level. You
+can load these data via
+
+```{r, message = FALSE}
+Gabba <- readr::read_csv(file.path("..", "..", "Week3", "Gabba.csv"), 
+                         col_types = c("ccccdddddddddd"), skip = 1, col_names = 
+                           c("FIPS", "ST", "State", "County", "Trump#", "Votes#", "Trump", "Pop",
+                             "Vaccinated#", "Vaccinated", "Death1", "Death2", "Death3", "Death4"))
+Gabba <- dplyr::filter(Gabba, Vaccinated < 100) # some data points were messed up
+Gabba$ST <- as.factor(Gabba$ST)
+```
+
+In Week3, we modeled the vaccinated percentage using a normal distribution. In this
+problem, we are going to utilize hierarchical GLMs.
+
+## Beta Likelihood
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("beta.stan"))
+```
+
+## Beta Posterior
+
+```{r}
+stan_data <- with(Gabba, list(N = nrow(Gabba), K = 1, 
+                              X = as.matrix(Trump - mean(Trump)) / 100,
+                              y = Vaccinated / 100, J = nlevels(ST),
+                              group = as.integer(ST), prior_only = FALSE,
+                              m = c(0, 0), scale = c(0.25, 0.5), rate = c(0.5, 1)))
+```
+
+```{r, beta, cache = TRUE, results = "hide"}
+post_beta <- stan("beta.stan", data = stan_data, seed = 20220504, save_warmup = FALSE)
+```
+```{r}
+print(post_beta, pars = c("alpha", "log_lik", "y_rep"), include = FALSE)
+```
+
+Although we could plot the non-linear relationship, the fact that the
+posterior distribution of the coefficient is so concentrated on negative
+values implies that counties with more support for Trump in 2020 tend
+to have much lower vaccination rates in 2022.
+
+## Binomial Likelihood
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("binomial.stan"))
+```
+
+## Binomial Posterior
+
+```{r}
+stan_data <- with(Gabba, list(N = nrow(Gabba), K = 1, 
+                              X = as.matrix(Trump - mean(Trump)) / 100,
+                              y = `Vaccinated#`, pop = Pop, J = nlevels(ST),
+                              group = as.integer(ST), prior_only = FALSE,
+                              m = c(0, 0), scale = c(0.25, 0.5), rate = 0.5))
+
+```
+
+```{r, binomial, cache = TRUE, results = "hide"}
+post_binomial <- stan("binomial.stan", data = stan_data, seed = 20220504, save_warmup = FALSE)
+```
+
+```{r}
+y_rep_beta <- rstan::extract(post_beta, "y_rep")[[1]]
+y_rep_binomial <- rstan::extract(post_binomial, "y_rep")[[1]]
+
+beta_low  <- apply(y_rep_beta, MARGIN = 2, FUN = quantile, probs = 1 / 3)
+beta_high <- apply(y_rep_beta, MARGIN = 2, FUN = quantile, probs = 2 / 3)
+
+binomial_low  <- apply(y_rep_binomial, MARGIN = 2, FUN = quantile, probs = 1 / 3)
+binomial_high <- apply(y_rep_binomial, MARGIN = 2, FUN = quantile, probs = 2 / 3)
+
+y <- stan_data$y / stan_data$pop
+
+rbind(beta = c(too_low = mean(y < beta_low), 
+               just_right = mean(y > beta_low & y < beta_high),
+               too_high = mean(y > beta_high)),
+      binomial = c(mean(y < binomial_low), 
+                   mean(y > binomial_low & y < binomial_high),
+                   mean(y > binomial_high)))
+```
+
+The model with the Beta likelihood predicts the proportion of people
+vaccinated in a county much better, although it overfits somewhat
+by including too many counties in the middle third of the predictive
+distribution. If we were interested in the gross number of vaccinated 
+people, the binomial model might well be more useful.
